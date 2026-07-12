@@ -9,6 +9,28 @@ class UserRegisterRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=100)
 
 
+class UserLoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenPairResponse(TokenResponse):
+    refresh_token: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
 class UserResponse(BaseModel):
     id: int
     email: EmailStr

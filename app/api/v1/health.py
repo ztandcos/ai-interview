@@ -14,3 +14,8 @@ async def health_check() -> dict[str, str]:
         "version": settings.PROJECT_VERSION,
         "environment": settings.ENVIRONMENT,
     }
+
+
+@router.get("/ping")
+async def pint() -> dict[str, str]:
+    return {"message": "pong"}

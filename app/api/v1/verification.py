@@ -22,10 +22,11 @@ async def send_code(
     request: VerificationCodeSendRequest,
     redis: Redis = Depends(get_redis),
 ) -> VerificationCodeSendResponse:
-    expires_in_seconds = await send_verification_code(redis, str(request.email))
+    code, expires_in_seconds = await send_verification_code(redis, str(request.email))
     return VerificationCodeSendResponse(
         message="Verification code sent",
         expires_in_seconds=expires_in_seconds,
+        codes=code,
     )
 
 

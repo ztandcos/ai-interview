@@ -10,7 +10,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-VERIFICATION_PURPOSE = "register"
+VERIFICATION_PURPOSE = "login"
 DELETE_CODE_IF_MATCHES = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
@@ -42,7 +42,7 @@ def redis_unavailable_exception() -> HTTPException:
     )
 
 
-async def send_verification_code(redis: Redis, email: str) -> int:
+async def send_verification_code(redis: Redis, email: str) -> tuple[str, int]:
     cooldown_key = verification_cooldown_key(email)
 
     try:
@@ -71,8 +71,7 @@ async def send_verification_code(redis: Redis, email: str) -> int:
 
     # First version does not integrate an email provider; code is visible only in server logs.
     logger.info("Verification code generated for %s: %s", normalize_email(email), code)
-    print(code)
-    return settings.VERIFICATION_CODE_TTL_SECONDS
+    return code, settings.VERIFICATION_CODE_TTL_SECONDS
 
 
 async def verify_verification_code(redis: Redis, email: str, code: str) -> None:

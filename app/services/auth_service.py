@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,13 @@ from app.core.security import (
 )
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
-from app.schemas.auth import TokenPairResponse, TokenResponse, UserLoginRequest, UserRegisterRequest
+from app.schemas.auth import (
+    TokenPairResponse,
+    TokenResponse,
+    UserLoginRequest,
+    UserRegisterRequest,
+)
+from app.services.verification_service import verify_verification_code
 
 
 async def register_user(db: AsyncSession, user_in: UserRegisterRequest) -> User:
@@ -67,8 +74,14 @@ def utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-async def login_user(db: AsyncSession, user_in: UserLoginRequest) -> TokenPairResponse:
+async def login_user(
+    db: AsyncSession,
+    redis: Redis,
+    user_in: UserLoginRequest,
+) -> TokenPairResponse:
     user = await authenticate_user(db, user_in)
+    await verify_verification_code(redis, str(user_in.email), user_in.code)
+
     access_token = create_access_token(subject=str(user.id))
     refresh_token, token_jti, expires_at = create_refresh_token(subject=str(user.id))
 

@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.redis import get_redis
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import (
@@ -38,8 +40,9 @@ async def register(
 async def login(
     user_in: UserLoginRequest,
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> TokenPairResponse:
-    return await login_user(db, user_in)
+    return await login_user(db, redis, user_in)
 
 
 @router.post("/refresh", response_model=TokenResponse)

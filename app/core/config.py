@@ -29,6 +29,9 @@ class Settings(BaseSettings):
 
     UPLOAD_DIR: str = "uploads/resumes"
     MAX_RESUME_FILE_SIZE_BYTES: int = 5 * 1024 * 1024
+    RESUME_CHUNK_SIZE: int = 800
+    RESUME_CHUNK_OVERLAP: int = 120
+    RESUME_SEARCH_DEFAULT_TOP_K: int = 5
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

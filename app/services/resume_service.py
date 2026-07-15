@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile, status
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import PyPdfError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,7 +58,9 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                 detail="Encrypted PDF resumes are not supported",
             )
         page_texts = [page.extract_text() or "" for page in reader.pages]
-    except PdfReadError as exc:
+    except HTTPException:
+        raise
+    except (PyPdfError, OSError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Could not parse PDF resume",
@@ -76,10 +78,16 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 def save_resume_file(user_id: int, original_filename: str, file_bytes: bytes) -> Path:
     upload_root = Path(settings.UPLOAD_DIR)
     user_dir = upload_root / str(user_id)
-    user_dir.mkdir(parents=True, exist_ok=True)
 
     storage_path = user_dir / f"{uuid4().hex}.pdf"
-    storage_path.write_bytes(file_bytes)
+    try:
+        user_dir.mkdir(parents=True, exist_ok=True)
+        storage_path.write_bytes(file_bytes)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not save uploaded resume file",
+        ) from exc
     return storage_path
 
 
@@ -104,10 +112,13 @@ async def upload_resume(
     db.add(resume)
     try:
         await db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         await db.rollback()
         storage_path.unlink(missing_ok=True)
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not save resume metadata",
+        ) from exc
 
     await db.refresh(resume)
     return resume

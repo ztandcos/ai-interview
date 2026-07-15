@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     RESUME_CHUNK_OVERLAP: int = 120
     RESUME_SEARCH_DEFAULT_TOP_K: int = 5
 
+    LLM_PROVIDER: str = "mock"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property

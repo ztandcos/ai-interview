@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     VERIFICATION_CODE_TTL_SECONDS: int = 300
     VERIFICATION_SEND_COOLDOWN_SECONDS: int = 60
 
+    UPLOAD_DIR: str = "uploads/resumes"
+    MAX_RESUME_FILE_SIZE_BYTES: int = 5 * 1024 * 1024
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property

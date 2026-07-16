@@ -5,7 +5,15 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import RefreshToken, Resume, ResumeChunk, User  # noqa: F401
+from app.models import (  # noqa: F401
+    Interview,
+    InterviewMessage,
+    InterviewReport,
+    RefreshToken,
+    Resume,
+    ResumeChunk,
+    User,
+)
 
 config = context.config
 

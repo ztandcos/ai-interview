@@ -1,10 +1,8 @@
 from contextlib import asynccontextmanager
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
 from app.api.router import api_router
@@ -42,10 +40,6 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(OperationalError, database_operational_error_handler)
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)
-
-    frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
-    if frontend_dir.exists():
-        app.mount("/app", StaticFiles(directory=frontend_dir, html=True), name="frontend")
     return app
 
 

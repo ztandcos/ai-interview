@@ -1,20 +1,24 @@
 from io import BytesIO
+import logging
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile, status
 from pypdf import PdfReader
 from pypdf.errors import PyPdfError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.interview import Interview
 from app.models.resume import Resume
+from app.models.resume_chunk import ResumeChunk
 from app.models.user import User
 
 
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf", "application/x-pdf"}
+logger = logging.getLogger(__name__)
 
 
 def clean_filename(filename: str | None) -> str:
@@ -150,3 +154,36 @@ async def get_resume(
             detail="Resume not found",
         )
     return resume
+
+
+async def delete_resume(
+    db: AsyncSession,
+    current_user: User,
+    resume_id: int,
+) -> None:
+    resume = await get_resume(db, current_user, resume_id)
+    has_interview = await db.scalar(
+        select(Interview.id).where(
+            Interview.resume_id == resume.id,
+            Interview.user_id == current_user.id,
+        )
+    )
+    if has_interview is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delete related interviews before deleting this resume",
+        )
+
+    await db.execute(
+        delete(ResumeChunk).where(
+            ResumeChunk.resume_id == resume.id,
+            ResumeChunk.user_id == current_user.id,
+        )
+    )
+    await db.delete(resume)
+    await db.commit()
+
+    try:
+        Path(resume.storage_path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not delete resume file %s", resume.storage_path)

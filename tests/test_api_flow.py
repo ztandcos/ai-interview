@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -43,7 +44,8 @@ async def register_and_login(client: AsyncClient) -> dict[str, str]:
         json={"email": email},
     )
     assert code_response.status_code == 200
-    code = code_response.json()["codes"]
+    code = code_response.json()["debug_code"]
+    assert code
 
     login_response = await client.post(
         "/api/v1/auth/login",
@@ -80,10 +82,19 @@ async def test_health_check(client: AsyncClient) -> None:
 
 async def test_auth_register_login_refresh_me_logout(client: AsyncClient) -> None:
     tokens = await register_and_login(client)
+    headers = auth_headers(tokens)
 
-    me_response = await client.get("/api/v1/auth/me", headers=auth_headers(tokens))
+    me_response = await client.get("/api/v1/auth/me", headers=headers)
     assert me_response.status_code == 200
     assert me_response.json()["email"] == tokens["email"]
+
+    update_response = await client.patch(
+        "/api/v1/auth/me",
+        headers=headers,
+        json={"full_name": "Updated API User"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["full_name"] == "Updated API User"
 
     refresh_response = await client.post(
         "/api/v1/auth/refresh",
@@ -92,16 +103,56 @@ async def test_auth_register_login_refresh_me_logout(client: AsyncClient) -> Non
     assert refresh_response.status_code == 200
     assert refresh_response.json()["access_token"]
 
+    change_password_response = await client.post(
+        "/api/v1/auth/change-password",
+        headers=headers,
+        json={
+            "current_password": tokens["password"],
+            "new_password": "NewPassword123456",
+        },
+    )
+    assert change_password_response.status_code == 200
+
+    revoked_refresh_response = await client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": tokens["refresh_token"]},
+    )
+    assert revoked_refresh_response.status_code == 401
+
+    await asyncio.sleep(1)
+    code_response = await client.post(
+        "/api/v1/verification/send",
+        json={"email": tokens["email"]},
+    )
+    assert code_response.status_code == 200
+    code = code_response.json()["debug_code"]
+    verify_response = await client.post(
+        "/api/v1/verification/verify",
+        json={"email": tokens["email"], "code": code},
+    )
+    assert verify_response.status_code == 200
+
+    new_login_response = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": tokens["email"],
+            "password": "NewPassword123456",
+            "code": code,
+        },
+    )
+    assert new_login_response.status_code == 200
+    new_refresh_token = new_login_response.json()["refresh_token"]
+
     logout_response = await client.post(
         "/api/v1/auth/logout",
-        json={"refresh_token": tokens["refresh_token"]},
+        json={"refresh_token": new_refresh_token},
     )
     assert logout_response.status_code == 200
     assert logout_response.json() == {"message": "Logged out"}
 
     refresh_after_logout_response = await client.post(
         "/api/v1/auth/refresh",
-        json={"refresh_token": tokens["refresh_token"]},
+        json={"refresh_token": new_refresh_token},
     )
     assert refresh_after_logout_response.status_code == 401
 
@@ -242,6 +293,7 @@ async def test_resume_rag_and_interview_session_flow(
         if message["message_type"] == "question"
     ]
     assert started["interview"]["status"] == "active"
+    assert started["interview"]["difficulty"] == "medium"
     assert len(question_message_ids) == 3
 
     answer_response = await client.post(
@@ -263,6 +315,21 @@ async def test_resume_rag_and_interview_session_flow(
     assert answer_body["score_message"]["message_type"] == "score"
     assert answer_body["follow_up_message"]["message_type"] == "follow_up"
     assert answer_body["score_message"]["score"] is not None
+    assert answer_body["answered_count"] == 1
+    assert answer_body["total_questions"] == 3
+    assert answer_body["is_finished"] is False
+    assert answer_body["next_question"]["id"] == question_message_ids[1]
+
+    duplicate_answer_response = await client.post(
+        f"/api/v1/interviews/{interview_id}/answers",
+        headers=headers,
+        json={
+            "question_message_id": question_message_ids[0],
+            "answer": "重复回答不应该被接受。",
+            "top_k": 5,
+        },
+    )
+    assert duplicate_answer_response.status_code == 409
 
     detail_response = await client.get(
         f"/api/v1/interviews/{interview_id}",
@@ -272,6 +339,30 @@ async def test_resume_rag_and_interview_session_flow(
     detail = detail_response.json()
     assert len(detail["messages"]) == 6
     assert detail["report"] is None
+
+    early_complete_response = await client.post(
+        f"/api/v1/interviews/{interview_id}/complete",
+        headers=headers,
+    )
+    assert early_complete_response.status_code == 409
+
+    for index, question_message_id in enumerate(question_message_ids[1:], start=2):
+        remaining_answer_response = await client.post(
+            f"/api/v1/interviews/{interview_id}/answers",
+            headers=headers,
+            json={
+                "question_message_id": question_message_id,
+                "answer": (
+                    f"第 {index} 题回答：我会先说明方案，再结合 FastAPI、MySQL、"
+                    "Redis 和 RAG 的实现细节，最后通过测试与日志验证结果。"
+                ),
+                "top_k": 5,
+            },
+        )
+        assert remaining_answer_response.status_code == 200
+
+    assert remaining_answer_response.json()["is_finished"] is True
+    assert remaining_answer_response.json()["next_question"] is None
 
     complete_response = await client.post(
         f"/api/v1/interviews/{interview_id}/complete",
@@ -286,3 +377,21 @@ async def test_resume_rag_and_interview_session_flow(
     interviews_response = await client.get("/api/v1/interviews", headers=headers)
     assert interviews_response.status_code == 200
     assert interviews_response.json()[0]["id"] == interview_id
+
+    resume_in_use_response = await client.delete(
+        f"/api/v1/resumes/{resume_id}",
+        headers=headers,
+    )
+    assert resume_in_use_response.status_code == 409
+
+    delete_interview_response = await client.delete(
+        f"/api/v1/interviews/{interview_id}",
+        headers=headers,
+    )
+    assert delete_interview_response.status_code == 200
+
+    delete_resume_response = await client.delete(
+        f"/api/v1/resumes/{resume_id}",
+        headers=headers,
+    )
+    assert delete_resume_response.status_code == 200

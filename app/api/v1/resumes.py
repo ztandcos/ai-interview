@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
+from app.schemas.auth import MessageResponse
 from app.schemas.resume_chunk import (
     ResumeChunkBuildResponse,
     ResumeChunkResponse,
@@ -16,7 +17,12 @@ from app.services.resume_chunk_service import (
     list_resume_chunks,
     search_resume_chunks,
 )
-from app.services.resume_service import get_resume, list_resumes, upload_resume
+from app.services.resume_service import (
+    delete_resume,
+    get_resume,
+    list_resumes,
+    upload_resume,
+)
 
 
 router = APIRouter()
@@ -32,7 +38,9 @@ async def upload_my_resume(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ResumeResponse:
-    return await upload_resume(db, current_user, file)
+    resume = await upload_resume(db, current_user, file)
+    await build_resume_chunks(db, current_user, resume.id)
+    return resume
 
 
 @router.get("", response_model=list[ResumeResponse])
@@ -99,3 +107,13 @@ async def read_my_resume(
     db: AsyncSession = Depends(get_db),
 ) -> ResumeDetailResponse:
     return await get_resume(db, current_user, resume_id)
+
+
+@router.delete("/{resume_id}", response_model=MessageResponse)
+async def delete_my_resume(
+    resume_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    await delete_resume(db, current_user, resume_id)
+    return MessageResponse(message="Resume deleted")

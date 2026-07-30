@@ -56,6 +56,11 @@ class FakeRedis:
             return -1
         return max(math.ceil(expires_at - time.monotonic()), 0)
 
+    async def get(self, key: str) -> str | None:
+        self._purge_expired(key)
+        item = self._values.get(key)
+        return item[0] if item is not None else None
+
     async def eval(self, _: str, __: int, key: str, expected_value: str) -> int:
         self._purge_expired(key)
         item = self._values.get(key)
@@ -87,6 +92,8 @@ async def client(tmp_path: Path, monkeypatch: Any) -> AsyncGenerator[AsyncClient
     monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
     monkeypatch.setattr(settings, "LLM_FALLBACK_TO_MOCK", False)
+    monkeypatch.setattr(settings, "EXPOSE_VERIFICATION_CODE", True)
+    monkeypatch.setattr(settings, "VERIFICATION_SEND_COOLDOWN_SECONDS", 1)
     monkeypatch.setattr(settings, "RESUME_CHUNK_SIZE", 240)
     monkeypatch.setattr(settings, "RESUME_CHUNK_OVERLAP", 40)
 

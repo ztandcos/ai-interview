@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.interview import Interview, InterviewMessage, InterviewReport
@@ -37,7 +37,7 @@ async def start_interview(
     request: InterviewStartRequest,
 ) -> InterviewStartResponse:
     question_request = QuestionGenerationRequest(
-        focus=request.focus,
+        focus=f"{request.focus}（{request.difficulty} difficulty）",
         question_count=request.question_count,
         top_k=request.top_k,
     )
@@ -51,8 +51,9 @@ async def start_interview(
     interview = Interview(
         user_id=current_user.id,
         resume_id=request.resume_id,
-        title=f"{request.focus} mock interview",
+        title=f"{request.focus} 模拟面试",
         focus=request.focus,
+        difficulty=request.difficulty,
         status=INTERVIEW_STATUS_ACTIVE,
         question_count=len(generated.questions),
     )
@@ -145,6 +146,17 @@ async def submit_interview_answer(
             detail="Question message not found",
         )
 
+    answered_question_ids = await get_answered_question_ids(
+        db,
+        current_user,
+        interview.id,
+    )
+    if question_message.id in answered_question_ids:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Question has already been answered",
+        )
+
     answer_message = InterviewMessage(
         interview_id=interview.id,
         user_id=current_user.id,
@@ -227,10 +239,39 @@ async def submit_interview_answer(
     await db.refresh(answer_message)
     await db.refresh(score_message)
     await db.refresh(follow_up_message)
+
+    answered_question_ids.add(question_message.id)
+    question_messages = list(
+        await db.scalars(
+            select(InterviewMessage)
+            .where(
+                InterviewMessage.interview_id == interview.id,
+                InterviewMessage.user_id == current_user.id,
+                InterviewMessage.message_type == "question",
+            )
+            .order_by(InterviewMessage.created_at, InterviewMessage.id)
+        )
+    )
+    next_question_message = next(
+        (
+            message
+            for message in question_messages
+            if message.id not in answered_question_ids
+        ),
+        None,
+    )
     return InterviewAnswerResponse(
         answer_message=to_message_response(answer_message),
         score_message=to_message_response(score_message),
         follow_up_message=to_message_response(follow_up_message),
+        next_question=(
+            to_message_response(next_question_message)
+            if next_question_message is not None
+            else None
+        ),
+        answered_count=len(answered_question_ids),
+        total_questions=interview.question_count,
+        is_finished=next_question_message is None,
     )
 
 
@@ -245,6 +286,18 @@ async def complete_interview(
         return InterviewCompleteResponse(
             interview=to_interview_summary(interview),
             report=existing_report,
+        )
+
+    answered_question_ids = await get_answered_question_ids(
+        db,
+        current_user,
+        interview.id,
+    )
+    if len(answered_question_ids) < interview.question_count:
+        remaining = interview.question_count - len(answered_question_ids)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Interview has {remaining} unanswered question(s)",
         )
 
     score_messages = list(
@@ -301,6 +354,52 @@ async def complete_interview(
         interview=to_interview_summary(interview),
         report=to_report_response(report),
     )
+
+
+async def delete_interview(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+) -> None:
+    interview = await get_owned_interview(db, current_user, interview_id)
+    await db.execute(
+        delete(InterviewReport).where(
+            InterviewReport.interview_id == interview.id,
+            InterviewReport.user_id == current_user.id,
+        )
+    )
+    await db.execute(
+        delete(InterviewMessage).where(
+            InterviewMessage.interview_id == interview.id,
+            InterviewMessage.user_id == current_user.id,
+        )
+    )
+    await db.delete(interview)
+    await db.commit()
+
+
+async def get_answered_question_ids(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+) -> set[int]:
+    answer_messages = await db.scalars(
+        select(InterviewMessage).where(
+            InterviewMessage.interview_id == interview_id,
+            InterviewMessage.user_id == current_user.id,
+            InterviewMessage.message_type == "answer",
+        )
+    )
+    return {
+        question_message_id
+        for message in answer_messages
+        if (
+            question_message_id := json_loads(message.metadata_json).get(
+                "question_message_id"
+            )
+        )
+        is not None
+    }
 
 
 async def get_owned_interview(

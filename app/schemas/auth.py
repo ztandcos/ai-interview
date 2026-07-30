@@ -9,6 +9,15 @@ class UserRegisterRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=100)
 
 
+class UserUpdateRequest(BaseModel):
+    full_name: str | None = Field(default=None, max_length=100)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class UserLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)

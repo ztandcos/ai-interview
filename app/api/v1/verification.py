@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from redis.asyncio import Redis
 
+from app.core.config import settings
 from app.core.redis import get_redis
 from app.schemas.verification import (
     VerificationCodeSendRequest,
@@ -26,7 +27,7 @@ async def send_code(
     return VerificationCodeSendResponse(
         message="Verification code sent",
         expires_in_seconds=expires_in_seconds,
-        codes=code,
+        debug_code=code if settings.EXPOSE_VERIFICATION_CODE else None,
     )
 
 
@@ -35,5 +36,10 @@ async def verify_code(
     request: VerificationCodeVerifyRequest,
     redis: Redis = Depends(get_redis),
 ) -> VerificationCodeVerifyResponse:
-    await verify_verification_code(redis, str(request.email), request.code)
+    await verify_verification_code(
+        redis,
+        str(request.email),
+        request.code,
+        consume=False,
+    )
     return VerificationCodeVerifyResponse(message="Verification code verified")

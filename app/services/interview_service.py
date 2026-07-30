@@ -1,4 +1,3 @@
-from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
@@ -17,7 +16,11 @@ from app.schemas.interview import (
     QuestionGenerationResponse,
 )
 from app.services.llm_provider import get_llm_provider
-from app.services.resume_chunk_service import list_resume_chunks, search_resume_chunks
+from app.services.resume_chunk_service import (
+    build_resume_chunks,
+    list_resume_chunks,
+    search_resume_chunks,
+)
 
 
 async def generate_resume_interview_questions(
@@ -136,10 +139,7 @@ async def get_resume_context_chunks(
 ) -> list[InterviewSourceChunk]:
     all_chunks = await list_resume_chunks(db, current_user, resume_id)
     if not all_chunks:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Resume chunks have not been built",
-        )
+        all_chunks = await build_resume_chunks(db, current_user, resume_id)
 
     scored_chunks = await search_resume_chunks(
         db,

@@ -16,16 +16,19 @@ from app.core.security import (
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.schemas.auth import (
+    PasswordChangeRequest,
     TokenPairResponse,
     TokenResponse,
     UserLoginRequest,
     UserRegisterRequest,
+    UserUpdateRequest,
 )
 from app.services.verification_service import verify_verification_code
 
 
 async def register_user(db: AsyncSession, user_in: UserRegisterRequest) -> User:
-    existing_user = await db.scalar(select(User).where(User.email == user_in.email))
+    normalized_email = str(user_in.email).strip().lower()
+    existing_user = await db.scalar(select(User).where(User.email == normalized_email))
     if existing_user is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -33,7 +36,7 @@ async def register_user(db: AsyncSession, user_in: UserRegisterRequest) -> User:
         )
 
     user = User(
-        email=str(user_in.email),
+        email=normalized_email,
         hashed_password=get_password_hash(user_in.password),
         full_name=user_in.full_name,
     )
@@ -53,7 +56,8 @@ async def register_user(db: AsyncSession, user_in: UserRegisterRequest) -> User:
 
 
 async def authenticate_user(db: AsyncSession, user_in: UserLoginRequest) -> User:
-    user = await db.scalar(select(User).where(User.email == user_in.email))
+    normalized_email = str(user_in.email).strip().lower()
+    user = await db.scalar(select(User).where(User.email == normalized_email))
     if user is None or not verify_password(user_in.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -146,4 +150,44 @@ async def logout_user(db: AsyncSession, refresh_token: str) -> None:
         return
 
     token_record.revoked_at = utc_now_naive()
+    await db.commit()
+
+
+async def update_user_profile(
+    db: AsyncSession,
+    current_user: User,
+    user_in: UserUpdateRequest,
+) -> User:
+    current_user.full_name = user_in.full_name.strip() if user_in.full_name else None
+    await db.commit()
+    await db.refresh(current_user)
+    return current_user
+
+
+async def change_user_password(
+    db: AsyncSession,
+    current_user: User,
+    password_in: PasswordChangeRequest,
+) -> None:
+    if not verify_password(password_in.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+    if password_in.current_password == password_in.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password",
+        )
+
+    current_user.hashed_password = get_password_hash(password_in.new_password)
+    active_refresh_tokens = await db.scalars(
+        select(RefreshToken).where(
+            RefreshToken.user_id == current_user.id,
+            RefreshToken.revoked_at.is_(None),
+        )
+    )
+    revoked_at = utc_now_naive()
+    for token_record in active_refresh_tokens:
+        token_record.revoked_at = revoked_at
     await db.commit()

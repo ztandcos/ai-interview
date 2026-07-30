@@ -1,0 +1,18 @@
+PrepPilot AI Interview Project
+
+Candidate: Docker Smoke Test
+Target: AI Application Backend Intern
+
+Skills
+Python, FastAPI, SQLAlchemy, MySQL, Redis, Docker, Vue, RAG, LLM API
+
+Project Experience
+Built an AI interview platform with FastAPI and asynchronous SQLAlchemy.
+Implemented JWT access and refresh tokens, Redis verification codes, PDF resume
+parsing, chunking and keyword retrieval. Designed an LLM provider abstraction
+for Mock, DeepSeek and Ollama. Added Vue pages for resume upload, interview
+practice and reports. Used pytest and Docker Compose to verify the full flow.
+
+Testing
+Covered registration, authentication, resume upload, retrieval, question
+generation, answer scoring, follow-up questions and interview reports.

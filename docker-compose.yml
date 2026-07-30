@@ -61,13 +61,13 @@ services:
       EXPOSE_VERIFICATION_CODE: ${EXPOSE_VERIFICATION_CODE:-true}
       UPLOAD_DIR: /app/uploads/resumes
       BACKEND_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
-      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
-      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-chat}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
-      LLM_FALLBACK_TO_MOCK: ${LLM_FALLBACK_TO_MOCK:-true}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL_NAME: ${OLLAMA_MODEL_NAME:-qwen2.5:3b}
+      LLM_PROVIDER: ${DOCKER_LLM_PROVIDER:-mock}
+      LLM_MODEL_NAME: ${DOCKER_LLM_MODEL_NAME:-deepseek-chat}
+      LLM_API_KEY: ${DOCKER_LLM_API_KEY:-}
+      LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_FALLBACK_TO_MOCK: ${DOCKER_LLM_FALLBACK_TO_MOCK:-true}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL_NAME: ${DOCKER_OLLAMA_MODEL_NAME:-qwen2.5:3b}
     ports:
       - "${BACKEND_EXPOSE_PORT:-8006}:8000"
     volumes:

@@ -100,12 +100,19 @@ async def list_interviews(
     db: AsyncSession,
     current_user: User,
 ) -> list[InterviewSummaryResponse]:
-    result = await db.scalars(
-        select(Interview)
+    result = await db.execute(
+        select(Interview, InterviewReport.overall_score)
+        .outerjoin(
+            InterviewReport,
+            InterviewReport.interview_id == Interview.id,
+        )
         .where(Interview.user_id == current_user.id)
         .order_by(Interview.created_at.desc(), Interview.id.desc())
     )
-    return [to_interview_summary(interview) for interview in result]
+    return [
+        to_interview_summary(interview, overall_score)
+        for interview, overall_score in result.all()
+    ]
 
 
 async def get_interview_detail(
@@ -461,8 +468,13 @@ def ensure_interview_active(interview: Interview) -> None:
         )
 
 
-def to_interview_summary(interview: Interview) -> InterviewSummaryResponse:
-    return InterviewSummaryResponse.model_validate(interview)
+def to_interview_summary(
+    interview: Interview,
+    overall_score: int | None = None,
+) -> InterviewSummaryResponse:
+    summary = InterviewSummaryResponse.model_validate(interview)
+    summary.overall_score = overall_score
+    return summary
 
 
 def to_message_response(message: InterviewMessage) -> InterviewMessageResponse:

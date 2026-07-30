@@ -33,6 +33,7 @@ class InterviewSummaryResponse(BaseModel):
     difficulty: InterviewDifficulty
     status: InterviewStatus
     question_count: int
+    overall_score: int | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None

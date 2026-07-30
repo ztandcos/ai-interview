@@ -377,6 +377,7 @@ async def test_resume_rag_and_interview_session_flow(
     interviews_response = await client.get("/api/v1/interviews", headers=headers)
     assert interviews_response.status_code == 200
     assert interviews_response.json()[0]["id"] == interview_id
+    assert interviews_response.json()[0]["overall_score"] == completed["report"]["overall_score"]
 
     resume_in_use_response = await client.delete(
         f"/api/v1/resumes/{resume_id}",

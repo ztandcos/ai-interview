@@ -9,6 +9,7 @@ from app.schemas.interview_session import (
     InterviewAnswerRequest,
     InterviewAnswerResponse,
     InterviewCompleteResponse,
+    InterviewCompleteRequest,
     InterviewDetailResponse,
     InterviewStartRequest,
     InterviewStartResponse,
@@ -66,10 +67,16 @@ async def answer_interview_question(
 @router.post("/{interview_id}/complete", response_model=InterviewCompleteResponse)
 async def complete_my_interview(
     interview_id: int,
+    request: InterviewCompleteRequest | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewCompleteResponse:
-    return await complete_interview(db, current_user, interview_id)
+    return await complete_interview(
+        db,
+        current_user,
+        interview_id,
+        force=request.force if request is not None else False,
+    )
 
 
 @router.delete("/{interview_id}", response_model=MessageResponse)

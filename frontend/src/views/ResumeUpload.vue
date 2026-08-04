@@ -127,7 +127,7 @@
         <p v-if="error" class="form-error">{{ error }}</p>
         <button class="button button-primary start-button" :disabled="loading">
           <span v-if="loading" class="spinner"></span>
-          {{ loading ? progressText : '生成面试题并开始' }}
+          {{ loading ? progressText : '开始实时 AI 面试' }}
         </button>
       </form>
 
@@ -145,7 +145,7 @@
             <span>上下文</span><strong>{{ selectedFile ? '新简历' : selectedResumeName }}</strong>
           </div>
           <div class="preview-flow">
-            <span>简历解析</span><i></i><span>RAG 检索</span><i></i><span>个性出题</span>
+            <span>简历解析</span><i></i><span>AI 开场</span><i></i><span>实时对话</span>
           </div>
         </div>
         <div class="privacy-note">
@@ -256,7 +256,7 @@ async function handleStart() {
       const resume = await uploadResume(selectedFile.value)
       resumeId = resume.id
     }
-    progressText.value = '正在生成问题'
+    progressText.value = 'AI 正在准备开场问题'
     const result = await startInterview({
       resume_id: resumeId,
       focus: form.focus,

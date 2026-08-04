@@ -1,8 +1,8 @@
 # PrepPilot · AI 模拟面试
 
-PrepPilot 是一个基于简历上下文的 AI 模拟面试平台。用户上传 PDF 简历、选择目标岗位和难度后，系统会检索相关项目经历生成个性化问题，对回答进行评分和追问，并保存完整面试记录与复盘报告。
+PrepPilot 是一个基于简历上下文的 AI 模拟面试平台。用户上传 PDF 简历、选择目标岗位和难度后，AI 会先开场，再根据每次回答实时检索相关经历并动态追问，最后保存完整面试记录与复盘报告。
 
-当前版本优先保证核心业务可以完整跑通。出题与评分默认使用本地 Mock 模型；简历检索使用宿主机 Ollama 的 `nomic-embed-text` 生成向量，不需要云端 API Key。
+当前版本默认使用宿主机 Ollama 的真实对话模型进行逐轮面试；简历检索使用 `nomic-embed-text` 生成向量，不需要云端 API Key。
 
 ## 已实现功能
 
@@ -13,7 +13,7 @@ PrepPilot 是一个基于简历上下文的 AI 模拟面试平台。用户上传
 - PDF 文件校验、文本提取、本地保存、用户权限隔离和简历删除。
 - 简历文本自动切片、Ollama embedding、Qdrant 语义检索、上下文拼接和来源片段记录。
 - Mock、DeepSeek/OpenAI-compatible、Ollama 三种 LLM Provider。
-- 面试难度与题量配置、重复答题保护、即时评分、追问、进度和综合报告。
+- 面试难度与题量配置、AI 开场、逐轮动态提问、即时评分、主动/自动结束和综合报告。
 - MySQL 持久化、Alembic 自动迁移、pytest 接口测试和 Docker Compose 一键启动。
 
 ## 系统结构
@@ -36,8 +36,8 @@ flowchart LR
 
 ```text
 PDF 上传 → 文本提取 → 自动切片 → 向量化 → Qdrant 语义检索
-→ Prompt 拼接 → 生成问题 → 提交回答
-→ 评分与追问 → 数据库存档 → 综合报告
+→ AI 开场与第一题 → 用户回答 → 动态召回与下一题
+→ 达到题量自动结束或主动结束 → 评分留档 → 综合报告
 ```
 
 ## Docker 一键启动
@@ -46,6 +46,7 @@ PDF 上传 → 文本提取 → 自动切片 → 向量化 → Qdrant 语义检�
 
 ```bash
 ollama pull nomic-embed-text
+ollama pull qwen2.5:3b
 ```
 
 ```bash
@@ -64,7 +65,7 @@ docker compose up -d --build
 
 默认端口为前端 `8080`、后端 `8006`、MySQL `3307`、Redis `6380`、Qdrant `6333`。如果端口被占用，可以在 `.env` 中修改对应的 `*_EXPOSE_PORT`。
 
-第一次启动会自动完成数据库迁移。默认 `LLM_PROVIDER=mock`，注册后在登录页点击“获取验证码”，开发验证码会自动填入。上传简历前必须保证宿主机 Ollama 正在运行并已下载 `nomic-embed-text`；严格向量模式下 embedding 或 Qdrant 不可用会拒绝上传并返回 `503`，避免保存未建立索引的简历。
+第一次启动会自动完成数据库迁移。默认 `LLM_PROVIDER=ollama`，注册后在登录页点击“获取验证码”，开发验证码会自动填入。上传简历前必须保证宿主机 Ollama 正在运行并已下载 `nomic-embed-text` 与 `qwen2.5:3b`；严格向量模式下 embedding 或 Qdrant 不可用会拒绝上传并返回 `503`，避免保存未建立索引的简历。
 
 常用命令：
 
@@ -150,7 +151,7 @@ make frontend-build
 - JWT 保护接口与个人资料更新。
 - PDF 上传、自动切片、向量检索、索引删除和用户数据隔离。
 - embedding 服务不可用时的上传拒绝与数据清理。
-- 生成问题、回答评分、追问、重复答题保护和完成条件。
+- AI 开场、逐轮动态提问、回答评分、重复答题保护和完成条件。
 - 面试记录、报告、简历与面试删除。
 
 ## 主要 API

@@ -1,9 +1,12 @@
+from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
 from app.prompts.interview import (
     build_answer_scoring_prompt,
     build_follow_up_prompt,
+    build_live_interview_system_prompt,
+    build_live_interview_turn_prompt,
     build_question_generation_prompt,
 )
 from app.schemas.interview import (
@@ -12,6 +15,7 @@ from app.schemas.interview import (
     FollowUpRequest,
     FollowUpResponse,
     InterviewSourceChunk,
+    LiveInterviewTurn,
     QuestionGenerationRequest,
     QuestionGenerationResponse,
 )
@@ -128,6 +132,51 @@ async def generate_resume_interview_follow_up(
         reason=reason,
         source_chunks=source_chunks,
     )
+
+
+async def generate_live_interview_turn(
+    db: AsyncSession,
+    current_user: User,
+    resume_id: int,
+    *,
+    focus: str,
+    difficulty: str,
+    turn_number: int,
+    history: str,
+    top_k: int,
+    opening: bool,
+    ask_next_question: bool,
+) -> tuple[LiveInterviewTurn, list[InterviewSourceChunk], str]:
+    query = focus if opening else history
+    source_chunks = await get_resume_context_chunks(
+        db,
+        current_user,
+        resume_id,
+        query,
+        top_k,
+    )
+    provider = get_llm_provider()
+    turn = await provider.generate_live_interview_turn(
+        build_live_interview_system_prompt(difficulty),
+        build_live_interview_turn_prompt(
+            focus=focus,
+            difficulty=difficulty,
+            turn_number=turn_number,
+            history=history,
+            chunks=source_chunks,
+            opening=opening,
+            ask_next_question=ask_next_question,
+        ),
+        source_chunks,
+        opening=opening,
+        ask_next_question=ask_next_question,
+    )
+    if ask_next_question and not turn.question:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM live interview response did not contain a question",
+        )
+    return turn, source_chunks, provider.name
 
 
 async def get_resume_context_chunks(

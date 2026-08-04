@@ -56,7 +56,7 @@
     <div v-else-if="!interviews.length" class="card empty-state">
       <div class="empty-icon">◎</div>
       <h3>从第一场模拟面试开始</h3>
-      <p>上传 PDF 简历，AI 会围绕你的目标岗位生成第一组问题。</p>
+      <p>上传 PDF 简历，AI 会围绕你的目标岗位开启一场实时面试对话。</p>
       <router-link class="button button-primary" to="/resume/new">
         上传简历并开始
       </router-link>

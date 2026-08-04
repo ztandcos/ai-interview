@@ -32,6 +32,14 @@ class InterviewQuestion(BaseModel):
     source_chunk_indexes: list[int]
 
 
+class LiveInterviewTurn(BaseModel):
+    greeting: str | None = None
+    feedback: str | None = None
+    question: str | None = None
+    expected_points: list[str] = Field(default_factory=list)
+    source_chunk_indexes: list[int] = Field(default_factory=list)
+
+
 class QuestionGenerationResponse(BaseModel):
     provider: str
     resume_id: int

@@ -14,9 +14,9 @@ export const submitAnswer = (interviewId, payload) =>
     .post(`/interviews/${interviewId}/answers`, payload)
     .then((response) => response.data)
 
-export const completeInterview = (interviewId) =>
+export const completeInterview = (interviewId, payload = {}) =>
   api
-    .post(`/interviews/${interviewId}/complete`)
+    .post(`/interviews/${interviewId}/complete`, payload)
     .then((response) => response.data)
 
 export const deleteInterview = (interviewId) =>

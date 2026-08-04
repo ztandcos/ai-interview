@@ -93,6 +93,38 @@ async def test_mock_provider_generates_requested_questions_and_score() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mock_provider_generates_live_interview_turns() -> None:
+    provider = MockLLMProvider()
+    chunks = [source_chunk()]
+
+    opening = await provider.generate_live_interview_turn(
+        "system",
+        "opening",
+        chunks,
+        opening=True,
+        ask_next_question=True,
+    )
+    next_turn = await provider.generate_live_interview_turn(
+        "system",
+        "next",
+        chunks,
+        opening=False,
+        ask_next_question=True,
+    )
+    closing = await provider.generate_live_interview_turn(
+        "system",
+        "closing",
+        chunks,
+        opening=False,
+        ask_next_question=False,
+    )
+
+    assert opening.greeting and opening.question
+    assert next_turn.feedback and next_turn.question
+    assert closing.feedback and closing.question is None
+
+
+@pytest.mark.asyncio
 async def test_ollama_embedding_provider_parses_batch_response(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResponse:
         def raise_for_status(self) -> None:

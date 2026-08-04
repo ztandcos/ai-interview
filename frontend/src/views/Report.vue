@@ -93,9 +93,9 @@
             <span>AI 反馈</span>
             <p>{{ item.score?.content || '暂无反馈' }}</p>
           </div>
-          <div v-if="item.followUp">
-            <span>追问思考</span>
-            <p>{{ item.followUp.content }}</p>
+          <div v-if="item.coachMessage">
+            <span>面试官继续交流</span>
+            <p>{{ item.coachMessage.content }}</p>
           </div>
         </div>
       </details>
@@ -140,9 +140,9 @@ const transcript = computed(() => {
         item.message_type === 'score' &&
         item.metadata.question_message_id === question.id,
     ),
-    followUp: messages.find(
+    coachMessage: messages.find(
       (item) =>
-        item.message_type === 'follow_up' &&
+        ['feedback', 'follow_up'].includes(item.message_type) &&
         item.metadata.question_message_id === question.id,
     ),
   }))

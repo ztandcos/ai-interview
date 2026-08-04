@@ -296,7 +296,8 @@ async def test_resume_rag_and_interview_session_flow(
     ]
     assert started["interview"]["status"] == "active"
     assert started["interview"]["difficulty"] == "medium"
-    assert len(question_message_ids) == 3
+    assert len(question_message_ids) == 1
+    assert started["messages"][0]["message_type"] == "greeting"
 
     answer_response = await client.post(
         f"/api/v1/interviews/{interview_id}/answers",
@@ -306,7 +307,7 @@ async def test_resume_rag_and_interview_session_flow(
             "answer": (
                 "这个项目的链路是上传 PDF 后提取文本，切成 chunks，"
                 "再根据面试方向检索相关上下文，拼接 prompt 调用 mock 或真实 LLM。"
-                "回答提交后会保存 answer、score 和 follow_up 三类消息。"
+                "回答提交后会根据这段内容继续生成下一轮问题。"
             ),
             "top_k": 5,
         },
@@ -315,12 +316,13 @@ async def test_resume_rag_and_interview_session_flow(
     answer_body = answer_response.json()
     assert answer_body["answer_message"]["message_type"] == "answer"
     assert answer_body["score_message"]["message_type"] == "score"
-    assert answer_body["follow_up_message"]["message_type"] == "follow_up"
+    assert answer_body["coach_message"]["message_type"] == "feedback"
     assert answer_body["score_message"]["score"] is not None
     assert answer_body["answered_count"] == 1
     assert answer_body["total_questions"] == 3
     assert answer_body["is_finished"] is False
-    assert answer_body["next_question"]["id"] == question_message_ids[1]
+    assert answer_body["next_question"]["message_type"] == "question"
+    next_question_id = answer_body["next_question"]["id"]
 
     duplicate_answer_response = await client.post(
         f"/api/v1/interviews/{interview_id}/answers",
@@ -348,12 +350,12 @@ async def test_resume_rag_and_interview_session_flow(
     )
     assert early_complete_response.status_code == 409
 
-    for index, question_message_id in enumerate(question_message_ids[1:], start=2):
+    for index in range(2, 4):
         remaining_answer_response = await client.post(
             f"/api/v1/interviews/{interview_id}/answers",
             headers=headers,
             json={
-                "question_message_id": question_message_id,
+                "question_message_id": next_question_id,
                 "answer": (
                     f"第 {index} 题回答：我会先说明方案，再结合 FastAPI、MySQL、"
                     "Redis 和 RAG 的实现细节，最后通过测试与日志验证结果。"
@@ -362,9 +364,14 @@ async def test_resume_rag_and_interview_session_flow(
             },
         )
         assert remaining_answer_response.status_code == 200
+        remaining_body = remaining_answer_response.json()
+        assert remaining_body["coach_message"]["message_type"] == "feedback"
+        if index < 3:
+            assert remaining_body["next_question"] is not None
+            next_question_id = remaining_body["next_question"]["id"]
 
-    assert remaining_answer_response.json()["is_finished"] is True
-    assert remaining_answer_response.json()["next_question"] is None
+    assert remaining_body["is_finished"] is True
+    assert remaining_body["next_question"] is None
 
     complete_response = await client.post(
         f"/api/v1/interviews/{interview_id}/complete",
@@ -376,10 +383,45 @@ async def test_resume_rag_and_interview_session_flow(
     assert 0 <= completed["report"]["overall_score"] <= 100
     assert completed["report"]["suggestions"]
 
+    early_start_response = await client.post(
+        "/api/v1/interviews",
+        headers=headers,
+        json={
+            "resume_id": resume_id,
+            "focus": "AI application backend intern",
+            "question_count": 3,
+            "top_k": 5,
+        },
+    )
+    early_interview = early_start_response.json()["interview"]
+    early_question = next(
+        message
+        for message in early_start_response.json()["messages"]
+        if message["message_type"] == "question"
+    )
+    await client.post(
+        f"/api/v1/interviews/{early_interview['id']}/answers",
+        headers=headers,
+        json={
+            "question_message_id": early_question["id"],
+            "answer": "我先说明项目背景、个人职责和具体实现，再通过测试验证效果。",
+            "top_k": 5,
+        },
+    )
+    forced_complete_response = await client.post(
+        f"/api/v1/interviews/{early_interview['id']}/complete",
+        headers=headers,
+        json={"force": True},
+    )
+    assert forced_complete_response.status_code == 200
+    assert forced_complete_response.json()["interview"]["status"] == "completed"
+
     interviews_response = await client.get("/api/v1/interviews", headers=headers)
     assert interviews_response.status_code == 200
-    assert interviews_response.json()[0]["id"] == interview_id
-    assert interviews_response.json()[0]["overall_score"] == completed["report"]["overall_score"]
+    assert {item["id"] for item in interviews_response.json()} == {
+        interview_id,
+        early_interview["id"],
+    }
 
     resume_in_use_response = await client.delete(
         f"/api/v1/resumes/{resume_id}",
@@ -392,6 +434,12 @@ async def test_resume_rag_and_interview_session_flow(
         headers=headers,
     )
     assert delete_interview_response.status_code == 200
+
+    delete_early_interview_response = await client.delete(
+        f"/api/v1/interviews/{early_interview['id']}",
+        headers=headers,
+    )
+    assert delete_early_interview_response.status_code == 200
 
     delete_resume_response = await client.delete(
         f"/api/v1/resumes/{resume_id}",

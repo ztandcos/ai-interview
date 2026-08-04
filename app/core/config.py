@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     EMBEDDING_VECTOR_SIZE: int = 768
     EMBEDDING_TIMEOUT_SECONDS: float = 30.0
 
-    LLM_PROVIDER: str = "mock"
+    LLM_PROVIDER: str = "ollama"
     LLM_MODEL_NAME: str = "deepseek-chat"
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.deepseek.com"
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.2
     LLM_FALLBACK_TO_MOCK: bool = False
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
-    OLLAMA_MODEL_NAME: str = "llama3.1"
+    OLLAMA_MODEL_NAME: str = "qwen2.5:3b"
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -10,7 +10,14 @@ from app.schemas.interview import InterviewQuestion
 InterviewStatus = Literal["active", "completed"]
 InterviewDifficulty = Literal["easy", "medium", "hard"]
 InterviewRole = Literal["assistant", "user", "system"]
-InterviewMessageType = Literal["question", "answer", "score", "follow_up"]
+InterviewMessageType = Literal[
+    "greeting",
+    "question",
+    "answer",
+    "score",
+    "feedback",
+    "follow_up",
+]
 
 
 class InterviewStartRequest(BaseModel):
@@ -88,7 +95,7 @@ class InterviewAnswerRequest(BaseModel):
 class InterviewAnswerResponse(BaseModel):
     answer_message: InterviewMessageResponse
     score_message: InterviewMessageResponse
-    follow_up_message: InterviewMessageResponse
+    coach_message: InterviewMessageResponse
     next_question: InterviewMessageResponse | None
     answered_count: int
     total_questions: int
@@ -98,3 +105,7 @@ class InterviewAnswerResponse(BaseModel):
 class InterviewCompleteResponse(BaseModel):
     interview: InterviewSummaryResponse
     report: InterviewReportResponse
+
+
+class InterviewCompleteRequest(BaseModel):
+    force: bool = False

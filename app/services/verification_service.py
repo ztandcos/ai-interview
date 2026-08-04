@@ -74,18 +74,33 @@ async def send_verification_code(redis: Redis, email: str) -> tuple[str, int]:
     return code, settings.VERIFICATION_CODE_TTL_SECONDS
 
 
-async def verify_verification_code(redis: Redis, email: str, code: str) -> None:
+async def verify_verification_code(
+    redis: Redis,
+    email: str,
+    code: str,
+    *,
+    consume: bool = True,
+) -> None:
     try:
-        deleted = await redis.eval(
-            DELETE_CODE_IF_MATCHES,
-            1,
-            verification_code_key(email),
-            code,
-        )
+        if consume:
+            matched = await redis.eval(
+                DELETE_CODE_IF_MATCHES,
+                1,
+                verification_code_key(email),
+                code,
+            )
+        else:
+            stored_code = await redis.get(verification_code_key(email))
+            if isinstance(stored_code, bytes):
+                stored_code = stored_code.decode()
+            matched = bool(
+                stored_code
+                and secrets.compare_digest(str(stored_code), code)
+            )
     except RedisError as exc:
         raise redis_unavailable_exception() from exc
 
-    if not deleted:
+    if not matched:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired verification code",

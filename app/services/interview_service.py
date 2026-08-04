@@ -5,6 +5,8 @@ from app.models.user import User
 from app.prompts.interview import (
     build_answer_scoring_prompt,
     build_follow_up_prompt,
+    build_live_interview_system_prompt,
+    build_live_interview_turn_prompt,
     build_question_generation_prompt,
 )
 from app.schemas.interview import (
@@ -13,11 +15,16 @@ from app.schemas.interview import (
     FollowUpRequest,
     FollowUpResponse,
     InterviewSourceChunk,
+    LiveInterviewTurn,
     QuestionGenerationRequest,
     QuestionGenerationResponse,
 )
-from app.services.llm_provider import get_llm_provider
-from app.services.resume_chunk_service import list_resume_chunks, search_resume_chunks
+from app.services.llm_provider import LLMProvider, get_llm_provider
+from app.services.resume_chunk_service import (
+    build_resume_chunks,
+    list_resume_chunks,
+    search_resume_chunks,
+)
 
 
 async def generate_resume_interview_questions(
@@ -127,6 +134,81 @@ async def generate_resume_interview_follow_up(
     )
 
 
+async def generate_live_interview_turn(
+    db: AsyncSession,
+    current_user: User,
+    resume_id: int,
+    *,
+    focus: str,
+    difficulty: str,
+    turn_number: int,
+    history: str,
+    top_k: int,
+    opening: bool,
+    ask_next_question: bool,
+) -> tuple[LiveInterviewTurn, list[InterviewSourceChunk], str]:
+    provider, system_prompt, turn_prompt, source_chunks = await prepare_live_interview_turn(
+        db,
+        current_user,
+        resume_id,
+        focus=focus,
+        difficulty=difficulty,
+        turn_number=turn_number,
+        history=history,
+        top_k=top_k,
+        opening=opening,
+        ask_next_question=ask_next_question,
+    )
+    turn = await provider.generate_live_interview_turn(
+        system_prompt,
+        turn_prompt,
+        source_chunks,
+        opening=opening,
+        ask_next_question=ask_next_question,
+    )
+    if ask_next_question and not turn.should_end and not turn.question:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM live interview response did not contain a question",
+        )
+    return turn, source_chunks, provider.name
+
+
+async def prepare_live_interview_turn(
+    db: AsyncSession,
+    current_user: User,
+    resume_id: int,
+    *,
+    focus: str,
+    difficulty: str,
+    turn_number: int,
+    history: str,
+    top_k: int,
+    opening: bool,
+    ask_next_question: bool,
+) -> tuple[LLMProvider, str, str, list[InterviewSourceChunk]]:
+    query = focus if opening else history
+    source_chunks = await get_resume_context_chunks(
+        db,
+        current_user,
+        resume_id,
+        query,
+        top_k,
+    )
+    provider = get_llm_provider()
+    system_prompt = build_live_interview_system_prompt(difficulty)
+    turn_prompt = build_live_interview_turn_prompt(
+        focus=focus,
+        difficulty=difficulty,
+        turn_number=turn_number,
+        history=history,
+        chunks=source_chunks,
+        opening=opening,
+        ask_next_question=ask_next_question,
+    )
+    return provider, system_prompt, turn_prompt, source_chunks
+
+
 async def get_resume_context_chunks(
     db: AsyncSession,
     current_user: User,
@@ -134,12 +216,9 @@ async def get_resume_context_chunks(
     query: str,
     top_k: int,
 ) -> list[InterviewSourceChunk]:
-    all_chunks = await list_resume_chunks(db, current_user, resume_id)
-    if not all_chunks:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Resume chunks have not been built",
-        )
+    chunks = await list_resume_chunks(db, current_user, resume_id)
+    if not chunks:
+        await build_resume_chunks(db, current_user, resume_id)
 
     scored_chunks = await search_resume_chunks(
         db,
@@ -148,9 +227,6 @@ async def get_resume_context_chunks(
         query,
         top_k,
     )
-    if not scored_chunks:
-        scored_chunks = [(chunk, 0) for chunk in all_chunks[:top_k]]
-
     return [
         InterviewSourceChunk(
             id=chunk.id,

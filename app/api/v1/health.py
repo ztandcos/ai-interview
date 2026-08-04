@@ -17,5 +17,5 @@ async def health_check() -> dict[str, str]:
 
 
 @router.get("/ping")
-async def pint() -> dict[str, str]:
+async def ping() -> dict[str, str]:
     return {"message": "pong"}

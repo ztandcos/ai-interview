@@ -13,7 +13,7 @@ class VerificationCodeVerifyRequest(BaseModel):
 class VerificationCodeSendResponse(BaseModel):
     message: str
     expires_in_seconds: int
-    codes: str
+    debug_code: str | None = None
 
 
 class VerificationCodeVerifyResponse(BaseModel):

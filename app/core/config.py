@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     PROJECT_VERSION: str = "0.1.0"
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
+    BACKEND_CORS_ORIGINS: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:8080,http://127.0.0.1:8080"
+    )
 
     MYSQL_HOST: str = "127.0.0.1"
     MYSQL_PORT: int = 3306
@@ -26,14 +30,20 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = ""
     VERIFICATION_CODE_TTL_SECONDS: int = 300
     VERIFICATION_SEND_COOLDOWN_SECONDS: int = 60
+    EXPOSE_VERIFICATION_CODE: bool = True
 
     UPLOAD_DIR: str = "uploads/resumes"
     MAX_RESUME_FILE_SIZE_BYTES: int = 5 * 1024 * 1024
     RESUME_CHUNK_SIZE: int = 800
     RESUME_CHUNK_OVERLAP: int = 120
     RESUME_SEARCH_DEFAULT_TOP_K: int = 5
+    QDRANT_URL: str = "http://127.0.0.1:6333"
+    QDRANT_COLLECTION_NAME: str = "resume_chunks"
+    EMBEDDING_MODEL_NAME: str = "nomic-embed-text"
+    EMBEDDING_VECTOR_SIZE: int = 768
+    EMBEDDING_TIMEOUT_SECONDS: float = 30.0
 
-    LLM_PROVIDER: str = "mock"
+    LLM_PROVIDER: str = "ollama"
     LLM_MODEL_NAME: str = "deepseek-chat"
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.deepseek.com"
@@ -41,10 +51,15 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 2
     LLM_TEMPERATURE: float = 0.2
     LLM_FALLBACK_TO_MOCK: bool = False
+    LIVE_INTERVIEW_MAX_TURNS: int = 12
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
-    OLLAMA_MODEL_NAME: str = "llama3.1"
+    OLLAMA_MODEL_NAME: str = "qwen2.5:3b"
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
@@ -61,6 +76,14 @@ class Settings(BaseSettings):
         if self.REDIS_PASSWORD:
             password = f":{quote(self.REDIS_PASSWORD, safe='')}@"
         return f"redis://{password}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    @property
+    def CORS_ORIGINS(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.BACKEND_CORS_ORIGINS.split(",")
+            if origin.strip()
+        ]
 
 
 settings = Settings()

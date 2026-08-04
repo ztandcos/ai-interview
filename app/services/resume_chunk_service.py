@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.resume_chunk import ResumeChunk
 from app.models.user import User
+from app.services.embedding_provider import get_embedding_provider
 from app.services.resume_service import get_resume
+from app.services.vector_store import get_vector_store
 
 
 WORD_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+#.\-]*|[\u4e00-\u9fff]{2,}")
@@ -69,23 +71,6 @@ def extract_keywords(text: str, limit: int = 12) -> list[str]:
     return [word for word, _ in Counter(useful_words).most_common(limit)]
 
 
-def score_chunk(query: str, chunk: ResumeChunk) -> int:
-    query_terms = extract_keywords(query, limit=20)
-    if not query_terms:
-        query_terms = [query.lower().strip()]
-
-    content = chunk.content.lower()
-    chunk_keywords = set(chunk.keywords)
-    score = 0
-    for term in query_terms:
-        if not term:
-            continue
-        score += content.count(term)
-        if term in chunk_keywords:
-            score += 2
-    return score
-
-
 async def build_resume_chunks(
     db: AsyncSession,
     current_user: User,
@@ -103,14 +88,7 @@ async def build_resume_chunks(
             detail="Resume text cannot be split into chunks",
         )
 
-    await db.execute(
-        delete(ResumeChunk).where(
-            ResumeChunk.resume_id == resume.id,
-            ResumeChunk.user_id == current_user.id,
-        )
-    )
-
-    chunks = [
+    chunk_drafts = [
         ResumeChunk(
             user_id=current_user.id,
             resume_id=resume.id,
@@ -122,18 +100,29 @@ async def build_resume_chunks(
         )
         for index, (char_start, char_end, content) in enumerate(chunk_tuples)
     ]
-    db.add_all(chunks)
-    await db.commit()
+    vectors = await get_embedding_provider().embed([chunk.content for chunk in chunk_drafts])
+    vector_store = get_vector_store()
 
-    result = await db.scalars(
-        select(ResumeChunk)
-        .where(
-            ResumeChunk.resume_id == resume.id,
-            ResumeChunk.user_id == current_user.id,
+    try:
+        await db.execute(
+            delete(ResumeChunk).where(
+                ResumeChunk.resume_id == resume.id,
+                ResumeChunk.user_id == current_user.id,
+            )
         )
-        .order_by(ResumeChunk.chunk_index)
-    )
-    return list(result)
+        db.add_all(chunk_drafts)
+        await db.flush()
+        await vector_store.replace_resume_vectors(chunk_drafts, vectors)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        try:
+            await vector_store.delete_resume_vectors(current_user.id, resume.id)
+        except Exception:
+            pass
+        raise
+
+    return chunk_drafts
 
 
 async def list_resume_chunks(
@@ -159,12 +148,27 @@ async def search_resume_chunks(
     resume_id: int,
     query: str,
     top_k: int,
-) -> list[tuple[ResumeChunk, int]]:
-    chunks = await list_resume_chunks(db, current_user, resume_id)
-    scored_chunks = [
-        (chunk, score)
-        for chunk in chunks
-        if (score := score_chunk(query, chunk)) > 0
+) -> list[tuple[ResumeChunk, float]]:
+    query_vector = (await get_embedding_provider().embed([query]))[0]
+    hits = await get_vector_store().search(
+        current_user.id,
+        resume_id,
+        query_vector,
+        top_k,
+    )
+    if not hits:
+        return []
+
+    chunks_result = await db.scalars(
+        select(ResumeChunk).where(
+            ResumeChunk.id.in_([hit.chunk_id for hit in hits]),
+            ResumeChunk.resume_id == resume_id,
+            ResumeChunk.user_id == current_user.id,
+        )
+    )
+    chunks_by_id = {chunk.id: chunk for chunk in chunks_result}
+    return [
+        (chunks_by_id[hit.chunk_id], hit.score)
+        for hit in hits
+        if hit.chunk_id in chunks_by_id
     ]
-    scored_chunks.sort(key=lambda item: (-item[1], item[0].chunk_index))
-    return scored_chunks[:top_k]

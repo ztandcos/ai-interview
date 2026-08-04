@@ -1,6 +1,6 @@
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -9,7 +9,7 @@ from openai import APIError, APITimeoutError, AsyncOpenAI
 from pydantic import ValidationError
 
 from app.core.config import settings
-from app.schemas.interview import InterviewQuestion, InterviewSourceChunk
+from app.schemas.interview import InterviewQuestion, InterviewSourceChunk, LiveInterviewTurn
 
 
 Difficulty = Literal["easy", "medium", "hard"]
@@ -44,6 +44,28 @@ class LLMProvider(Protocol):
         answer: str,
         chunks: Sequence[InterviewSourceChunk],
     ) -> tuple[str, str]:
+        raise NotImplementedError
+
+    async def generate_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> LiveInterviewTurn:
+        raise NotImplementedError
+
+    async def stream_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> AsyncIterator[str]:
         raise NotImplementedError
 
 
@@ -156,6 +178,63 @@ class MockLLMProvider:
         reason = "mock provider 根据回答中尚未充分覆盖的简历关键词生成追问"
         return follow_up, reason
 
+    async def generate_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> LiveInterviewTurn:
+        del system_prompt, turn_prompt
+        chunk = chunks[0]
+        keywords = _keywords_or_defaults(chunk)
+        if opening:
+            return LiveInterviewTurn(
+                greeting="你好，很高兴和你进行这场模拟面试。我们会围绕你的真实项目经历展开，请尽量结合具体细节作答。",
+                question=(
+                    f"先从简历中的 {', '.join(keywords[:2])} 经历谈起：你在这个项目里"
+                    "承担了什么角色，最重要的目标是什么？"
+                ),
+                expected_points=["项目背景与个人职责", "关键目标或结果"],
+                source_chunk_indexes=[chunk.chunk_index],
+            )
+        if not ask_next_question:
+            return LiveInterviewTurn(
+                feedback="谢谢你的回答。这场面试的主要问题已经完成，稍后我会为你汇总表现和下一步练习建议。",
+                should_end=True,
+            )
+        return LiveInterviewTurn(
+            feedback="我理解了你的思路。接下来我想进一步了解其中的关键决策。",
+            question=(
+                f"围绕 {keywords[0]}，你当时遇到过什么具体挑战？请说明你的判断、"
+                "实现过程，以及如何验证结果。"
+            ),
+            expected_points=["具体挑战", "技术取舍", "验证与复盘"],
+            source_chunk_indexes=[chunk.chunk_index],
+        )
+
+    async def stream_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> AsyncIterator[str]:
+        turn = await self.generate_live_interview_turn(
+            system_prompt,
+            turn_prompt,
+            chunks,
+            opening=opening,
+            ask_next_question=ask_next_question,
+        )
+        payload = turn.model_dump_json()
+        for index in range(0, len(payload), 12):
+            yield payload[index : index + 12]
+
 
 class OpenAICompatibleLLMProvider:
     name = "deepseek"
@@ -205,6 +284,47 @@ class OpenAICompatibleLLMProvider:
         del question, answer
         data = await self._json_chat(build_follow_up_json_instruction(), prompt)
         return normalize_follow_up(data, chunks)
+
+    async def generate_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> LiveInterviewTurn:
+        del opening, ask_next_question
+        data = await self._json_chat(system_prompt, turn_prompt)
+        return normalize_live_interview_turn(data, chunks)
+
+    async def stream_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> AsyncIterator[str]:
+        del chunks, opening, ask_next_question
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": turn_prompt},
+                ],
+                temperature=settings.LLM_TEMPERATURE,
+                response_format={"type": "json_object"},
+                stream=True,
+            )
+            async for chunk in stream:
+                content = chunk.choices[0].delta.content if chunk.choices else None
+                if content:
+                    yield content
+        except (APIError, APITimeoutError) as exc:
+            raise provider_runtime_error("LLM provider request failed") from exc
 
     async def _json_chat(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         try:
@@ -265,6 +385,55 @@ class OllamaLLMProvider:
         del question, answer
         data = await self._json_chat(build_follow_up_json_instruction(), prompt)
         return normalize_follow_up(data, chunks)
+
+    async def generate_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> LiveInterviewTurn:
+        del opening, ask_next_question
+        data = await self._json_chat(system_prompt, turn_prompt)
+        return normalize_live_interview_turn(data, chunks)
+
+    async def stream_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> AsyncIterator[str]:
+        del chunks, opening, ask_next_question
+        payload = {
+            "model": self.model,
+            "stream": True,
+            "format": "json",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": turn_prompt},
+            ],
+            "options": {"temperature": settings.LLM_TEMPERATURE},
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.LLM_TIMEOUT_SECONDS,
+                trust_env=False,
+            ) as client:
+                async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        content = json.loads(line).get("message", {}).get("content", "")
+                        if content:
+                            yield str(content)
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            raise provider_runtime_error("Ollama streaming request failed") from exc
 
     async def _json_chat(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         payload = {
@@ -335,6 +504,53 @@ class FallbackLLMProvider:
         return await self._call(
             lambda provider: provider.generate_follow_up(prompt, question, answer, chunks)
         )
+
+    async def generate_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> LiveInterviewTurn:
+        return await self._call(
+            lambda provider: provider.generate_live_interview_turn(
+                system_prompt,
+                turn_prompt,
+                chunks,
+                opening=opening,
+                ask_next_question=ask_next_question,
+            )
+        )
+
+    async def stream_live_interview_turn(
+        self,
+        system_prompt: str,
+        turn_prompt: str,
+        chunks: Sequence[InterviewSourceChunk],
+        *,
+        opening: bool,
+        ask_next_question: bool,
+    ) -> AsyncIterator[str]:
+        try:
+            async for token in self.primary.stream_live_interview_turn(
+                system_prompt,
+                turn_prompt,
+                chunks,
+                opening=opening,
+                ask_next_question=ask_next_question,
+            ):
+                yield token
+        except HTTPException:
+            async for token in self.fallback.stream_live_interview_turn(
+                system_prompt,
+                turn_prompt,
+                chunks,
+                opening=opening,
+                ask_next_question=ask_next_question,
+            ):
+                yield token
 
     async def _call(self, fn: Callable[[LLMProvider], Awaitable[Any]]) -> Any:
         try:
@@ -478,6 +694,35 @@ def normalize_follow_up(
     if not reason:
         reason = "真实模型根据简历上下文和候选人回答生成追问"
     return question, reason
+
+
+def normalize_live_interview_turn(
+    data: dict[str, Any],
+    chunks: Sequence[InterviewSourceChunk],
+) -> LiveInterviewTurn:
+    fallback_index = chunks[0].chunk_index if chunks else 0
+    indexes = normalize_source_indexes(
+        data.get("source_chunk_indexes"),
+        {chunk.chunk_index for chunk in chunks},
+        fallback_index,
+    )
+    question = str(data.get("question") or "").strip() or None
+    greeting = str(data.get("greeting") or "").strip() or None
+    feedback = str(data.get("feedback") or "").strip() or None
+    if question is None and feedback is None and greeting is None:
+        raise provider_parse_error("LLM live interview response was empty")
+    return LiveInterviewTurn(
+        greeting=greeting,
+        feedback=feedback,
+        question=question,
+        expected_points=normalize_string_list(
+            data.get("expected_points"),
+            ["结合真实项目说明背景、实现和验证"],
+        ),
+        source_chunk_indexes=indexes if question is not None else [],
+        should_end=data.get("should_end") is True
+        or str(data.get("should_end", "")).strip().lower() == "true",
+    )
 
 
 def normalize_difficulty(value: Any, index: int) -> Difficulty:

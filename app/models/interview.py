@@ -18,6 +18,12 @@ class Interview(Base):
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     focus: Mapped[str] = mapped_column(String(100), nullable=False)
+    difficulty: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="medium",
+        server_default="medium",
+    )
     status: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

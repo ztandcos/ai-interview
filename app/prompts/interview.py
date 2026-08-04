@@ -71,3 +71,71 @@ def build_follow_up_prompt(
             format_chunks_for_prompt(chunks),
         ]
     )
+
+
+def build_live_interview_system_prompt(difficulty: str) -> str:
+    difficulty_instructions = {
+        "easy": (
+            "Use a friendly, reassuring tone. Start from project background, personal role, "
+            "and core concepts. Give one small clarification when the candidate is stuck."
+        ),
+        "medium": (
+            "Probe implementation detail, trade-offs, debugging, testing, and measurable "
+            "outcomes. Keep the tone professional and encouraging."
+        ),
+        "hard": (
+            "Probe system design, constraints, failure modes, scalability, security, and "
+            "alternatives. Challenge unsupported claims while staying respectful."
+        ),
+    }
+    return "\n\n".join(
+        [
+            "You are a senior interviewer conducting a live Chinese interview.",
+            "Do not reveal internal rubrics or say that you are an AI.",
+            "Ask exactly one focused question at a time. Adapt the next question to the "
+            "candidate's answer instead of following a fixed question list.",
+            "Ground questions in the retrieved resume evidence; do not invent experience.",
+            "Decide for yourself when the interview has enough evidence across the candidate's "
+            "experience and required depth, then close naturally instead of asking another question.",
+            difficulty_instructions.get(difficulty, difficulty_instructions["medium"]),
+        ]
+    )
+
+
+def build_live_interview_turn_prompt(
+    *,
+    focus: str,
+    difficulty: str,
+    turn_number: int,
+    history: str,
+    chunks: Sequence[InterviewSourceChunk],
+    opening: bool,
+    ask_next_question: bool,
+) -> str:
+    stage = (
+        "This is the opening. Give a short natural greeting (one or two sentences), then ask "
+        "the first resume-grounded question."
+        if opening
+        else (
+            "feedback MUST be a non-empty, brief acknowledgement of the last answer. Then ask the next best question."
+            if ask_next_question
+            else "Briefly close the conversation after the last answer; do not ask another question."
+        )
+    )
+    return "\n\n".join(
+        [
+            "Return only valid JSON. Do not use markdown.",
+            "JSON keys in this exact order: greeting (string or null), feedback (string or null), "
+            "question (string or null), expected_points (string array), source_chunk_indexes "
+            "(integer array), should_end (boolean).",
+            f"Target role: {focus}",
+            f"Difficulty: {difficulty}",
+            f"Question number: {turn_number}",
+            f"Instruction: {stage} When you decide the interview is complete, set should_end to "
+            "true and question to null. Otherwise set should_end to false and ask one next question."
+            "Conversation so far:",
+            history or "No prior messages.",
+            "Retrieved resume chunks:",
+            format_chunks_for_prompt(chunks),
+        ]
+    )

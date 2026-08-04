@@ -1,13 +1,16 @@
 import json
+import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.interview import Interview, InterviewMessage, InterviewReport
 from app.models.user import User
-from app.schemas.interview import AnswerScoringRequest, FollowUpRequest, QuestionGenerationRequest
+from app.schemas.interview import AnswerScoringRequest, InterviewQuestion
 from app.schemas.interview_session import (
     InterviewAnswerRequest,
     InterviewAnswerResponse,
@@ -21,10 +24,11 @@ from app.schemas.interview_session import (
 )
 from app.services.auth_service import utc_now_naive
 from app.services.interview_service import (
-    generate_resume_interview_follow_up,
-    generate_resume_interview_questions,
+    generate_live_interview_turn,
+    prepare_live_interview_turn,
     score_resume_interview_answer,
 )
+from app.services.llm_provider import normalize_live_interview_turn, parse_json_object
 
 
 INTERVIEW_STATUS_ACTIVE = "active"
@@ -36,61 +40,70 @@ async def start_interview(
     current_user: User,
     request: InterviewStartRequest,
 ) -> InterviewStartResponse:
-    question_request = QuestionGenerationRequest(
-        focus=request.focus,
-        question_count=request.question_count,
-        top_k=request.top_k,
-    )
-    generated = await generate_resume_interview_questions(
-        db,
-        current_user,
-        request.resume_id,
-        question_request,
-    )
-
     interview = Interview(
         user_id=current_user.id,
         resume_id=request.resume_id,
-        title=f"{request.focus} mock interview",
+        title=f"{request.focus} 模拟面试",
         focus=request.focus,
+        difficulty=request.difficulty,
         status=INTERVIEW_STATUS_ACTIVE,
-        question_count=len(generated.questions),
+        question_count=request.question_count,
     )
     db.add(interview)
     await db.flush()
 
-    question_messages = [
-        InterviewMessage(
-            interview_id=interview.id,
-            user_id=current_user.id,
-            role="assistant",
-            message_type="question",
-            content=question.question,
-            metadata_json=json_dumps(
-                {
-                    "provider": generated.provider,
-                    "question_id": question.question_id,
-                    "difficulty": question.difficulty,
-                    "expected_points": question.expected_points,
-                    "source_chunk_indexes": question.source_chunk_indexes,
-                    "source_chunk_ids": [
-                        chunk.id
-                        for chunk in generated.source_chunks
-                        if chunk.chunk_index in question.source_chunk_indexes
-                    ],
-                }
-            ),
-        )
-        for question in generated.questions
-    ]
-    db.add_all(question_messages)
+    turn, source_chunks, provider_name = await generate_live_interview_turn(
+        db,
+        current_user,
+        interview.resume_id,
+        focus=interview.focus,
+        difficulty=interview.difficulty,
+        turn_number=1,
+        history="",
+        top_k=request.top_k,
+        opening=True,
+        ask_next_question=True,
+    )
+    greeting_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="assistant",
+        message_type="greeting",
+        content=turn.greeting or "你好，很高兴和你进行这场模拟面试。",
+        metadata_json=json_dumps({"provider": provider_name}),
+    )
+    question_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="assistant",
+        message_type="question",
+        content=turn.question or "请介绍一下你最有代表性的项目经历。",
+        metadata_json=json_dumps(
+            question_metadata(
+                provider_name,
+                interview.difficulty,
+                turn.expected_points,
+                turn.source_chunk_indexes,
+                source_chunks,
+            )
+        ),
+    )
+    db.add_all([greeting_message, question_message])
     await db.commit()
     await db.refresh(interview)
 
     messages = await list_interview_messages(db, current_user, interview.id)
     return InterviewStartResponse(
         interview=to_interview_summary(interview),
-        questions=generated.questions,
+        questions=[
+            InterviewQuestion(
+                question_id=f"live-q-{question_message.id}",
+                difficulty=interview.difficulty,  # type: ignore[arg-type]
+                question=question_message.content,
+                expected_points=turn.expected_points,
+                source_chunk_indexes=turn.source_chunk_indexes,
+            )
+        ],
         messages=messages,
     )
 
@@ -99,12 +112,19 @@ async def list_interviews(
     db: AsyncSession,
     current_user: User,
 ) -> list[InterviewSummaryResponse]:
-    result = await db.scalars(
-        select(Interview)
+    result = await db.execute(
+        select(Interview, InterviewReport.overall_score)
+        .outerjoin(
+            InterviewReport,
+            InterviewReport.interview_id == Interview.id,
+        )
         .where(Interview.user_id == current_user.id)
         .order_by(Interview.created_at.desc(), Interview.id.desc())
     )
-    return [to_interview_summary(interview) for interview in result]
+    return [
+        to_interview_summary(interview, overall_score)
+        for interview, overall_score in result.all()
+    ]
 
 
 async def get_interview_detail(
@@ -143,6 +163,17 @@ async def submit_interview_answer(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Question message not found",
+        )
+
+    answered_question_ids = await get_answered_question_ids(
+        db,
+        current_user,
+        interview.id,
+    )
+    if question_message.id in answered_question_ids:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Question has already been answered",
         )
 
     answer_message = InterviewMessage(
@@ -192,52 +223,243 @@ async def submit_interview_answer(
     db.add(score_message)
     await db.flush()
 
-    follow_up_result = await generate_resume_interview_follow_up(
+    answered_count = len(answered_question_ids) + 1
+    history = await build_live_history(db, current_user, interview.id)
+    turn, source_chunks, provider_name = await generate_live_interview_turn(
         db,
         current_user,
         interview.resume_id,
-        FollowUpRequest(
-            question=question_message.content,
-            answer=request.answer,
-            top_k=request.top_k,
-        ),
+        focus=interview.focus,
+        difficulty=interview.difficulty,
+        turn_number=answered_count + 1,
+        history=history,
+        top_k=request.top_k,
+        opening=False,
+        ask_next_question=True,
     )
-    follow_up_message = InterviewMessage(
+    should_end = turn.should_end or (
+        settings.LIVE_INTERVIEW_MAX_TURNS > 0
+        and answered_count >= settings.LIVE_INTERVIEW_MAX_TURNS
+    )
+    coach_message = InterviewMessage(
         interview_id=interview.id,
         user_id=current_user.id,
         role="assistant",
-        message_type="follow_up",
-        content=follow_up_result.follow_up_question,
+        message_type="feedback",
+        content=turn.feedback or "谢谢你的回答，我已经记录了这部分表现。",
         metadata_json=json_dumps(
             {
-                "provider": follow_up_result.provider,
+                "provider": provider_name,
                 "question_message_id": question_message.id,
                 "answer_message_id": answer_message.id,
-                "reason": follow_up_result.reason,
-                "source_chunk_ids": [chunk.id for chunk in follow_up_result.source_chunks],
-                "source_chunk_indexes": [
-                    chunk.chunk_index for chunk in follow_up_result.source_chunks
-                ],
+                "source_chunk_ids": [chunk.id for chunk in source_chunks],
+                "source_chunk_indexes": [chunk.chunk_index for chunk in source_chunks],
             }
         ),
     )
-    db.add(follow_up_message)
+    db.add(coach_message)
+    next_question_message: InterviewMessage | None = None
+    if not should_end:
+        next_question_message = InterviewMessage(
+            interview_id=interview.id,
+            user_id=current_user.id,
+            role="assistant",
+            message_type="question",
+            content=turn.question or "请继续结合一个具体例子展开说明。",
+            metadata_json=json_dumps(
+                question_metadata(
+                    provider_name,
+                    interview.difficulty,
+                    turn.expected_points,
+                    turn.source_chunk_indexes,
+                    source_chunks,
+                )
+            ),
+        )
+        db.add(next_question_message)
     await db.commit()
 
     await db.refresh(answer_message)
     await db.refresh(score_message)
-    await db.refresh(follow_up_message)
+    await db.refresh(coach_message)
+    if next_question_message is not None:
+        await db.refresh(next_question_message)
+    if should_end:
+        await complete_interview(db, current_user, interview.id, force=True)
+
     return InterviewAnswerResponse(
         answer_message=to_message_response(answer_message),
         score_message=to_message_response(score_message),
-        follow_up_message=to_message_response(follow_up_message),
+        coach_message=to_message_response(coach_message),
+        next_question=(
+            to_message_response(next_question_message)
+            if next_question_message is not None
+            else None
+        ),
+        answered_count=answered_count,
+        total_questions=interview.question_count,
+        is_finished=should_end,
     )
+
+
+async def stream_interview_answer(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+    request: InterviewAnswerRequest,
+) -> AsyncIterator[dict[str, Any]]:
+    interview = await get_owned_interview(db, current_user, interview_id)
+    ensure_interview_active(interview)
+    question_message = await db.scalar(
+        select(InterviewMessage).where(
+            InterviewMessage.id == request.question_message_id,
+            InterviewMessage.interview_id == interview.id,
+            InterviewMessage.user_id == current_user.id,
+            InterviewMessage.message_type == "question",
+        )
+    )
+    if question_message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question message not found")
+    answered_question_ids = await get_answered_question_ids(db, current_user, interview.id)
+    if question_message.id in answered_question_ids:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Question has already been answered")
+
+    answer_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="user",
+        message_type="answer",
+        content=request.answer,
+        metadata_json=json_dumps({"question_message_id": question_message.id}),
+    )
+    db.add(answer_message)
+    await db.commit()
+    await db.refresh(answer_message)
+    yield {"event": "answer", "data": {"message": to_message_response(answer_message).model_dump(mode="json")}}
+
+    answered_count = len(answered_question_ids) + 1
+    history = await build_live_history(db, current_user, interview.id)
+    provider, system_prompt, turn_prompt, source_chunks = await prepare_live_interview_turn(
+        db,
+        current_user,
+        interview.resume_id,
+        focus=interview.focus,
+        difficulty=interview.difficulty,
+        turn_number=answered_count + 1,
+        history=history,
+        top_k=request.top_k,
+        opening=False,
+        ask_next_question=True,
+    )
+    raw_content = ""
+    emitted = {"feedback": "", "question": ""}
+    async for token in provider.stream_live_interview_turn(
+        system_prompt,
+        turn_prompt,
+        source_chunks,
+        opening=False,
+        ask_next_question=True,
+    ):
+        raw_content += token
+        for field in emitted:
+            value = extract_stream_string(raw_content, field)
+            if value is not None and value.startswith(emitted[field]):
+                delta = value[len(emitted[field]) :]
+                if delta:
+                    emitted[field] = value
+                    yield {"event": "delta", "data": {"field": field, "content": delta}}
+
+    turn = normalize_live_interview_turn(parse_json_object(raw_content), source_chunks)
+    should_end = turn.should_end or (
+        settings.LIVE_INTERVIEW_MAX_TURNS > 0
+        and answered_count >= settings.LIVE_INTERVIEW_MAX_TURNS
+    )
+    if not should_end and not turn.question:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM live interview response did not contain a question",
+        )
+
+    score_result = await score_resume_interview_answer(
+        db,
+        current_user,
+        interview.resume_id,
+        AnswerScoringRequest(question=question_message.content, answer=request.answer, top_k=request.top_k),
+    )
+    score_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="assistant",
+        message_type="score",
+        content=build_score_message_content(score_result),
+        score=score_result.score,
+        metadata_json=json_dumps(
+            {
+                "provider": score_result.provider,
+                "question_message_id": question_message.id,
+                "answer_message_id": answer_message.id,
+                "level": score_result.level,
+                "strengths": score_result.strengths,
+                "improvements": score_result.improvements,
+                "reference_points": score_result.reference_points,
+                "source_chunk_ids": [chunk.id for chunk in score_result.source_chunks],
+                "source_chunk_indexes": [chunk.chunk_index for chunk in score_result.source_chunks],
+            }
+        ),
+    )
+    coach_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="assistant",
+        message_type="feedback",
+        content=turn.feedback or "谢谢你的回答，我已经记录了这部分表现。",
+        metadata_json=json_dumps(
+            {
+                "provider": provider.name,
+                "question_message_id": question_message.id,
+                "answer_message_id": answer_message.id,
+                "source_chunk_ids": [chunk.id for chunk in source_chunks],
+                "source_chunk_indexes": [chunk.chunk_index for chunk in source_chunks],
+            }
+        ),
+    )
+    db.add_all([score_message, coach_message])
+    next_question_message: InterviewMessage | None = None
+    if not should_end:
+        next_question_message = InterviewMessage(
+            interview_id=interview.id,
+            user_id=current_user.id,
+            role="assistant",
+            message_type="question",
+            content=turn.question or "请继续结合一个具体例子展开说明。",
+            metadata_json=json_dumps(
+                question_metadata(provider.name, interview.difficulty, turn.expected_points, turn.source_chunk_indexes, source_chunks)
+            ),
+        )
+        db.add(next_question_message)
+    await db.commit()
+    await db.refresh(score_message)
+    await db.refresh(coach_message)
+    if next_question_message is not None:
+        await db.refresh(next_question_message)
+    if should_end:
+        await complete_interview(db, current_user, interview.id, force=True)
+    yield {
+        "event": "complete",
+        "data": {
+            "coach_message": to_message_response(coach_message).model_dump(mode="json"),
+            "next_question": to_message_response(next_question_message).model_dump(mode="json") if next_question_message else None,
+            "is_finished": should_end,
+        },
+    }
 
 
 async def complete_interview(
     db: AsyncSession,
     current_user: User,
     interview_id: int,
+    *,
+    force: bool = False,
 ) -> InterviewCompleteResponse:
     interview = await get_owned_interview(db, current_user, interview_id)
     existing_report = await get_interview_report(db, current_user, interview.id)
@@ -245,6 +467,28 @@ async def complete_interview(
         return InterviewCompleteResponse(
             interview=to_interview_summary(interview),
             report=existing_report,
+        )
+
+    answered_question_ids = await get_answered_question_ids(
+        db,
+        current_user,
+        interview.id,
+    )
+    if not answered_question_ids:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Interview has no answered question",
+        )
+    if not force and interview.question_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Let the AI finish the interview or confirm an early finish",
+        )
+    if not force and len(answered_question_ids) < interview.question_count:
+        remaining = interview.question_count - len(answered_question_ids)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Interview has {remaining} unanswered question(s)",
         )
 
     score_messages = list(
@@ -303,6 +547,52 @@ async def complete_interview(
     )
 
 
+async def delete_interview(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+) -> None:
+    interview = await get_owned_interview(db, current_user, interview_id)
+    await db.execute(
+        delete(InterviewReport).where(
+            InterviewReport.interview_id == interview.id,
+            InterviewReport.user_id == current_user.id,
+        )
+    )
+    await db.execute(
+        delete(InterviewMessage).where(
+            InterviewMessage.interview_id == interview.id,
+            InterviewMessage.user_id == current_user.id,
+        )
+    )
+    await db.delete(interview)
+    await db.commit()
+
+
+async def get_answered_question_ids(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+) -> set[int]:
+    answer_messages = await db.scalars(
+        select(InterviewMessage).where(
+            InterviewMessage.interview_id == interview_id,
+            InterviewMessage.user_id == current_user.id,
+            InterviewMessage.message_type == "answer",
+        )
+    )
+    return {
+        question_message_id
+        for message in answer_messages
+        if (
+            question_message_id := json_loads(message.metadata_json).get(
+                "question_message_id"
+            )
+        )
+        is not None
+    }
+
+
 async def get_owned_interview(
     db: AsyncSession,
     current_user: User,
@@ -338,6 +628,28 @@ async def list_interview_messages(
     return [to_message_response(message) for message in result]
 
 
+async def build_live_history(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+) -> str:
+    messages = list(
+        await db.scalars(
+            select(InterviewMessage)
+            .where(
+                InterviewMessage.interview_id == interview_id,
+                InterviewMessage.user_id == current_user.id,
+                InterviewMessage.message_type.in_(["greeting", "question", "answer", "feedback"]),
+            )
+            .order_by(InterviewMessage.created_at, InterviewMessage.id)
+        )
+    )
+    return "\n".join(
+        f"{'Candidate' if message.role == 'user' else 'Interviewer'}: {message.content}"
+        for message in messages[-12:]
+    )
+
+
 async def get_interview_report(
     db: AsyncSession,
     current_user: User,
@@ -362,8 +674,13 @@ def ensure_interview_active(interview: Interview) -> None:
         )
 
 
-def to_interview_summary(interview: Interview) -> InterviewSummaryResponse:
-    return InterviewSummaryResponse.model_validate(interview)
+def to_interview_summary(
+    interview: Interview,
+    overall_score: int | None = None,
+) -> InterviewSummaryResponse:
+    summary = InterviewSummaryResponse.model_validate(interview)
+    summary.overall_score = overall_score
+    return summary
 
 
 def to_message_response(message: InterviewMessage) -> InterviewMessageResponse:
@@ -400,6 +717,26 @@ def build_score_message_content(score_result: Any) -> str:
             f"改进：{'；'.join(score_result.improvements)}",
         ]
     )
+
+
+def question_metadata(
+    provider: str,
+    difficulty: str,
+    expected_points: list[str],
+    source_chunk_indexes: list[int],
+    source_chunks: list[Any],
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "difficulty": difficulty,
+        "expected_points": expected_points,
+        "source_chunk_indexes": source_chunk_indexes,
+        "source_chunk_ids": [
+            chunk.id
+            for chunk in source_chunks
+            if chunk.chunk_index in source_chunk_indexes
+        ],
+    }
 
 
 def build_report_summary(overall_score: int, scored_answers: int) -> str:
@@ -447,3 +784,28 @@ def json_loads(value: str, default: Any | None = None) -> Any:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def extract_stream_string(content: str, field: str) -> str | None:
+    match = re.search(rf'"{re.escape(field)}"\s*:\s*"', content)
+    if match is None:
+        return None
+    chars: list[str] = []
+    escaped = False
+    for character in content[match.end() :]:
+        if escaped:
+            chars.append(character)
+            escaped = False
+            continue
+        if character == "\\":
+            chars.append(character)
+            escaped = True
+            continue
+        if character == '"':
+            break
+        chars.append(character)
+    value = "".join(chars)
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace("\\n", "\n")

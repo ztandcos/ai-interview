@@ -10,13 +10,13 @@ class InterviewSourceChunk(BaseModel):
     resume_id: int
     chunk_index: int
     content: str
-    score: int
+    score: float
     keywords: list[str]
 
 
 class QuestionGenerationRequest(BaseModel):
     focus: str = Field(default="backend engineering", min_length=1, max_length=100)
-    question_count: int = Field(default=3, ge=1, le=5)
+    question_count: int = Field(default=3, ge=1, le=10)
     top_k: int = Field(
         default=settings.RESUME_SEARCH_DEFAULT_TOP_K,
         ge=1,
@@ -30,6 +30,15 @@ class InterviewQuestion(BaseModel):
     question: str
     expected_points: list[str]
     source_chunk_indexes: list[int]
+
+
+class LiveInterviewTurn(BaseModel):
+    greeting: str | None = None
+    feedback: str | None = None
+    question: str | None = None
+    expected_points: list[str] = Field(default_factory=list)
+    source_chunk_indexes: list[int] = Field(default_factory=list)
+    should_end: bool = False
 
 
 class QuestionGenerationResponse(BaseModel):

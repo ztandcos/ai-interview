@@ -1,0 +1,136 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DOCKER_MYSQL_ROOT_PASSWORD:-local-root-password}
+      MYSQL_DATABASE: ai_interview
+      MYSQL_USER: ai_interview
+      MYSQL_PASSWORD: ${DOCKER_MYSQL_PASSWORD:-local-app-password}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_EXPOSE_PORT:-3307}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_EXPOSE_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_EXPOSE_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':18BD' /proc/net/tcp /proc/net/tcp6"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command:
+      [
+        "sh",
+        "-c",
+        "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000",
+      ]
+    environment:
+      ENVIRONMENT: development
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ai_interview
+      MYSQL_PASSWORD: ${DOCKER_MYSQL_PASSWORD:-local-app-password}
+      MYSQL_DATABASE: ai_interview
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-resume_chunks}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-nomic-embed-text}
+      EMBEDDING_VECTOR_SIZE: ${EMBEDDING_VECTOR_SIZE:-768}
+      EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-30}
+      LIVE_INTERVIEW_MAX_TURNS: ${LIVE_INTERVIEW_MAX_TURNS:-12}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-local-development-secret-change-me}
+      EXPOSE_VERIFICATION_CODE: ${EXPOSE_VERIFICATION_CODE:-true}
+      UPLOAD_DIR: /app/uploads/resumes
+      BACKEND_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
+      LLM_PROVIDER: ${DOCKER_LLM_PROVIDER:-ollama}
+      LLM_MODEL_NAME: ${DOCKER_LLM_MODEL_NAME:-deepseek-chat}
+      LLM_API_KEY: ${DOCKER_LLM_API_KEY:-}
+      LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_FALLBACK_TO_MOCK: ${DOCKER_LLM_FALLBACK_TO_MOCK:-false}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL_NAME: ${DOCKER_OLLAMA_MODEL_NAME:-qwen2.5:3b}
+    ports:
+      - "${BACKEND_EXPOSE_PORT:-8006}:8000"
+    volumes:
+      - resume_uploads:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_EXPOSE_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  mysql_data:
+  redis_data:
+  resume_uploads:
+  qdrant_data:

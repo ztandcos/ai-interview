@@ -8,18 +8,22 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import (
     MessageResponse,
+    PasswordChangeRequest,
     RefreshTokenRequest,
     TokenPairResponse,
     TokenResponse,
     UserLoginRequest,
     UserRegisterRequest,
     UserResponse,
+    UserUpdateRequest,
 )
 from app.services.auth_service import (
+    change_user_password,
     login_user,
     logout_user,
     refresh_access_token,
     register_user,
+    update_user_profile,
 )
 
 
@@ -65,3 +69,22 @@ async def logout(
 @router.get("/me", response_model=UserResponse)
 async def read_me(current_user: User = Depends(get_current_user)) -> UserResponse:
     return current_user
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_me(
+    user_in: UserUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    return await update_user_profile(db, current_user, user_in)
+
+
+@router.post("/change-password", response_model=MessageResponse)
+async def change_password(
+    password_in: PasswordChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    await change_user_password(db, current_user, password_in)
+    return MessageResponse(message="Password changed")

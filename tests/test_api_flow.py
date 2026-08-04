@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -43,7 +45,8 @@ async def register_and_login(client: AsyncClient) -> dict[str, str]:
         json={"email": email},
     )
     assert code_response.status_code == 200
-    code = code_response.json()["codes"]
+    code = code_response.json()["debug_code"]
+    assert code
 
     login_response = await client.post(
         "/api/v1/auth/login",
@@ -80,10 +83,19 @@ async def test_health_check(client: AsyncClient) -> None:
 
 async def test_auth_register_login_refresh_me_logout(client: AsyncClient) -> None:
     tokens = await register_and_login(client)
+    headers = auth_headers(tokens)
 
-    me_response = await client.get("/api/v1/auth/me", headers=auth_headers(tokens))
+    me_response = await client.get("/api/v1/auth/me", headers=headers)
     assert me_response.status_code == 200
     assert me_response.json()["email"] == tokens["email"]
+
+    update_response = await client.patch(
+        "/api/v1/auth/me",
+        headers=headers,
+        json={"full_name": "Updated API User"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["full_name"] == "Updated API User"
 
     refresh_response = await client.post(
         "/api/v1/auth/refresh",
@@ -92,16 +104,56 @@ async def test_auth_register_login_refresh_me_logout(client: AsyncClient) -> Non
     assert refresh_response.status_code == 200
     assert refresh_response.json()["access_token"]
 
+    change_password_response = await client.post(
+        "/api/v1/auth/change-password",
+        headers=headers,
+        json={
+            "current_password": tokens["password"],
+            "new_password": "NewPassword123456",
+        },
+    )
+    assert change_password_response.status_code == 200
+
+    revoked_refresh_response = await client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": tokens["refresh_token"]},
+    )
+    assert revoked_refresh_response.status_code == 401
+
+    await asyncio.sleep(1)
+    code_response = await client.post(
+        "/api/v1/verification/send",
+        json={"email": tokens["email"]},
+    )
+    assert code_response.status_code == 200
+    code = code_response.json()["debug_code"]
+    verify_response = await client.post(
+        "/api/v1/verification/verify",
+        json={"email": tokens["email"], "code": code},
+    )
+    assert verify_response.status_code == 200
+
+    new_login_response = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": tokens["email"],
+            "password": "NewPassword123456",
+            "code": code,
+        },
+    )
+    assert new_login_response.status_code == 200
+    new_refresh_token = new_login_response.json()["refresh_token"]
+
     logout_response = await client.post(
         "/api/v1/auth/logout",
-        json={"refresh_token": tokens["refresh_token"]},
+        json={"refresh_token": new_refresh_token},
     )
     assert logout_response.status_code == 200
     assert logout_response.json() == {"message": "Logged out"}
 
     refresh_after_logout_response = await client.post(
         "/api/v1/auth/refresh",
-        json={"refresh_token": tokens["refresh_token"]},
+        json={"refresh_token": new_refresh_token},
     )
     assert refresh_after_logout_response.status_code == 401
 
@@ -179,6 +231,7 @@ async def test_resume_rag_and_interview_session_flow(
     search_results = search_response.json()
     assert search_results
     assert search_results[0]["score"] > 0
+    assert isinstance(search_results[0]["score"], float)
 
     question_response = await client.post(
         f"/api/v1/resumes/{resume_id}/interview/questions",
@@ -229,7 +282,6 @@ async def test_resume_rag_and_interview_session_flow(
         json={
             "resume_id": resume_id,
             "focus": "AI application backend intern",
-            "question_count": 3,
             "top_k": 5,
         },
     )
@@ -242,7 +294,10 @@ async def test_resume_rag_and_interview_session_flow(
         if message["message_type"] == "question"
     ]
     assert started["interview"]["status"] == "active"
-    assert len(question_message_ids) == 3
+    assert started["interview"]["difficulty"] == "medium"
+    assert started["interview"]["question_count"] == 0
+    assert len(question_message_ids) == 1
+    assert started["messages"][0]["message_type"] == "greeting"
 
     answer_response = await client.post(
         f"/api/v1/interviews/{interview_id}/answers",
@@ -252,7 +307,7 @@ async def test_resume_rag_and_interview_session_flow(
             "answer": (
                 "这个项目的链路是上传 PDF 后提取文本，切成 chunks，"
                 "再根据面试方向检索相关上下文，拼接 prompt 调用 mock 或真实 LLM。"
-                "回答提交后会保存 answer、score 和 follow_up 三类消息。"
+                "回答提交后会根据这段内容继续生成下一轮问题。"
             ),
             "top_k": 5,
         },
@@ -261,8 +316,24 @@ async def test_resume_rag_and_interview_session_flow(
     answer_body = answer_response.json()
     assert answer_body["answer_message"]["message_type"] == "answer"
     assert answer_body["score_message"]["message_type"] == "score"
-    assert answer_body["follow_up_message"]["message_type"] == "follow_up"
+    assert answer_body["coach_message"]["message_type"] == "feedback"
     assert answer_body["score_message"]["score"] is not None
+    assert answer_body["answered_count"] == 1
+    assert answer_body["total_questions"] == 0
+    assert answer_body["is_finished"] is False
+    assert answer_body["next_question"]["message_type"] == "question"
+    next_question_id = answer_body["next_question"]["id"]
+
+    duplicate_answer_response = await client.post(
+        f"/api/v1/interviews/{interview_id}/answers",
+        headers=headers,
+        json={
+            "question_message_id": question_message_ids[0],
+            "answer": "重复回答不应该被接受。",
+            "top_k": 5,
+        },
+    )
+    assert duplicate_answer_response.status_code == 409
 
     detail_response = await client.get(
         f"/api/v1/interviews/{interview_id}",
@@ -273,9 +344,39 @@ async def test_resume_rag_and_interview_session_flow(
     assert len(detail["messages"]) == 6
     assert detail["report"] is None
 
+    early_complete_response = await client.post(
+        f"/api/v1/interviews/{interview_id}/complete",
+        headers=headers,
+    )
+    assert early_complete_response.status_code == 409
+
+    for index in range(2, 4):
+        remaining_answer_response = await client.post(
+            f"/api/v1/interviews/{interview_id}/answers",
+            headers=headers,
+            json={
+                "question_message_id": next_question_id,
+                "answer": (
+                    f"第 {index} 题回答：我会先说明方案，再结合 FastAPI、MySQL、"
+                    "Redis 和 RAG 的实现细节，最后通过测试与日志验证结果。"
+                ),
+                "top_k": 5,
+            },
+        )
+        assert remaining_answer_response.status_code == 200
+        remaining_body = remaining_answer_response.json()
+        assert remaining_body["coach_message"]["message_type"] == "feedback"
+        if index < 3:
+            assert remaining_body["next_question"] is not None
+            next_question_id = remaining_body["next_question"]["id"]
+
+    assert remaining_body["is_finished"] is False
+    assert remaining_body["next_question"] is not None
+
     complete_response = await client.post(
         f"/api/v1/interviews/{interview_id}/complete",
         headers=headers,
+        json={"force": True},
     )
     assert complete_response.status_code == 200
     completed = complete_response.json()
@@ -283,6 +384,151 @@ async def test_resume_rag_and_interview_session_flow(
     assert 0 <= completed["report"]["overall_score"] <= 100
     assert completed["report"]["suggestions"]
 
+    early_start_response = await client.post(
+        "/api/v1/interviews",
+        headers=headers,
+        json={
+            "resume_id": resume_id,
+            "focus": "AI application backend intern",
+            "top_k": 5,
+        },
+    )
+    early_interview = early_start_response.json()["interview"]
+    early_question = next(
+        message
+        for message in early_start_response.json()["messages"]
+        if message["message_type"] == "question"
+    )
+    stream_response = await client.post(
+        f"/api/v1/interviews/{early_interview['id']}/answers/stream",
+        headers=headers,
+        json={
+            "question_message_id": early_question["id"],
+            "answer": "我先说明项目背景、个人职责和具体实现，再通过测试验证效果。",
+            "top_k": 5,
+        },
+    )
+    assert stream_response.status_code == 200
+    assert "event: delta" in stream_response.text
+    assert "event: complete" in stream_response.text
+    forced_complete_response = await client.post(
+        f"/api/v1/interviews/{early_interview['id']}/complete",
+        headers=headers,
+        json={"force": True},
+    )
+    assert forced_complete_response.status_code == 200
+    assert forced_complete_response.json()["interview"]["status"] == "completed"
+
     interviews_response = await client.get("/api/v1/interviews", headers=headers)
     assert interviews_response.status_code == 200
-    assert interviews_response.json()[0]["id"] == interview_id
+    assert {item["id"] for item in interviews_response.json()} == {
+        interview_id,
+        early_interview["id"],
+    }
+
+    resume_in_use_response = await client.delete(
+        f"/api/v1/resumes/{resume_id}",
+        headers=headers,
+    )
+    assert resume_in_use_response.status_code == 409
+
+    delete_interview_response = await client.delete(
+        f"/api/v1/interviews/{interview_id}",
+        headers=headers,
+    )
+    assert delete_interview_response.status_code == 200
+
+    delete_early_interview_response = await client.delete(
+        f"/api/v1/interviews/{early_interview['id']}",
+        headers=headers,
+    )
+    assert delete_early_interview_response.status_code == 200
+
+    delete_resume_response = await client.delete(
+        f"/api/v1/resumes/{resume_id}",
+        headers=headers,
+    )
+    assert delete_resume_response.status_code == 200
+    assert client._fake_vector_store._vectors == {}  # type: ignore[attr-defined]
+
+
+async def test_upload_rejects_and_cleans_up_when_embedding_is_unavailable(
+    client: AsyncClient,
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from app.services import resume_chunk_service, resume_service
+    from app.services.embedding_provider import RAGUnavailableError
+
+    class UnavailableProvider:
+        async def embed(self, _: list[str]) -> list[list[float]]:
+            raise RAGUnavailableError("Embedding service is unavailable")
+
+    monkeypatch.setattr(resume_service, "extract_text_from_pdf", lambda _: SAMPLE_RESUME_TEXT)
+    monkeypatch.setattr(
+        resume_chunk_service,
+        "get_embedding_provider",
+        lambda: UnavailableProvider(),
+    )
+    tokens = await register_and_login(client)
+    headers = auth_headers(tokens)
+
+    response = await client.post(
+        "/api/v1/resumes",
+        headers=headers,
+        files={
+            "file": (
+                "unavailable.pdf",
+                b"%PDF-1.4\n% test pdf bytes\n",
+                "application/pdf",
+            )
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Embedding service is unavailable" in response.json()["detail"]
+    assert (await client.get("/api/v1/resumes", headers=headers)).json() == []
+    assert not list((tmp_path / "uploads").rglob("*.pdf"))
+    assert client._fake_vector_store._vectors == {}  # type: ignore[attr-defined]
+
+
+async def test_upload_rejects_and_cleans_up_when_vector_store_is_unavailable(
+    client: AsyncClient,
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from app.services import resume_chunk_service, resume_service
+    from app.services.embedding_provider import RAGUnavailableError
+
+    class UnavailableVectorStore:
+        async def replace_resume_vectors(self, _: list[Any], __: list[list[float]]) -> None:
+            raise RAGUnavailableError("Qdrant is unavailable")
+
+        async def delete_resume_vectors(self, _: int, __: int) -> None:
+            return None
+
+    monkeypatch.setattr(resume_service, "extract_text_from_pdf", lambda _: SAMPLE_RESUME_TEXT)
+    monkeypatch.setattr(
+        resume_chunk_service,
+        "get_vector_store",
+        lambda: UnavailableVectorStore(),
+    )
+    tokens = await register_and_login(client)
+    headers = auth_headers(tokens)
+
+    response = await client.post(
+        "/api/v1/resumes",
+        headers=headers,
+        files={
+            "file": (
+                "qdrant-unavailable.pdf",
+                b"%PDF-1.4\n% test pdf bytes\n",
+                "application/pdf",
+            )
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Qdrant is unavailable" in response.json()["detail"]
+    assert (await client.get("/api/v1/resumes", headers=headers)).json() == []
+    assert not list((tmp_path / "uploads").rglob("*.pdf"))

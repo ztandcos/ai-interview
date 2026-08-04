@@ -18,6 +18,7 @@ from app.services.resume_chunk_service import (
     search_resume_chunks,
 )
 from app.services.resume_service import (
+    cleanup_failed_resume_upload,
     delete_resume,
     get_resume,
     list_resumes,
@@ -39,7 +40,13 @@ async def upload_my_resume(
     db: AsyncSession = Depends(get_db),
 ) -> ResumeResponse:
     resume = await upload_resume(db, current_user, file)
-    await build_resume_chunks(db, current_user, resume.id)
+    resume_id = resume.id
+    storage_path = resume.storage_path
+    try:
+        await build_resume_chunks(db, current_user, resume_id)
+    except Exception:
+        await cleanup_failed_resume_upload(db, resume_id, storage_path)
+        raise
     return resume
 
 

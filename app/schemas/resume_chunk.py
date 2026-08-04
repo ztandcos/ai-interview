@@ -37,5 +37,5 @@ class ResumeChunkSearchResult(BaseModel):
     resume_id: int
     chunk_index: int
     content: str
-    score: int
+    score: float
     keywords: list[str]

@@ -1,4 +1,4 @@
-.PHONY: help up down reset logs status test frontend-install frontend-dev frontend-build
+.PHONY: help up down reset logs status test rag-reindex frontend-install frontend-dev frontend-build
 
 help:
 	@echo "make up             构建并启动全部 Docker 服务"
@@ -7,6 +7,7 @@ help:
 	@echo "make logs           跟踪全部服务日志"
 	@echo "make status         查看容器状态"
 	@echo "make test           运行后端测试"
+	@echo "make rag-reindex    为已有简历重建向量索引"
 	@echo "make frontend-build 构建前端生产包"
 
 up:
@@ -26,6 +27,9 @@ status:
 
 test:
 	.venv/bin/python -m pytest -q
+
+rag-reindex:
+	docker compose exec backend python -m scripts.reindex_resumes
 
 frontend-install:
 	cd frontend && npm install

@@ -2,7 +2,7 @@
 
 PrepPilot 是一个基于简历上下文的 AI 模拟面试平台。用户上传 PDF 简历、选择目标岗位和难度后，系统会检索相关项目经历生成个性化问题，对回答进行评分和追问，并保存完整面试记录与复盘报告。
 
-当前版本优先保证核心业务可以完整跑通。默认使用本地 Mock 模型，不需要 API Key；需要更真实的出题与评分时，可以切换到 DeepSeek 或本机 Ollama。
+当前版本优先保证核心业务可以完整跑通。出题与评分默认使用本地 Mock 模型；简历检索使用宿主机 Ollama 的 `nomic-embed-text` 生成向量，不需要云端 API Key。
 
 ## 已实现功能
 
@@ -11,7 +11,7 @@ PrepPilot 是一个基于简历上下文的 AI 模拟面试平台。用户上传
 - JWT access token + refresh token，支持刷新、退出和密码修改后的令牌撤销。
 - Redis 登录验证码、有效期和发送冷却；开发环境可自动填入验证码。
 - PDF 文件校验、文本提取、本地保存、用户权限隔离和简历删除。
-- 简历文本自动切片、关键词检索、上下文拼接和来源片段记录。
+- 简历文本自动切片、Ollama embedding、Qdrant 语义检索、上下文拼接和来源片段记录。
 - Mock、DeepSeek/OpenAI-compatible、Ollama 三种 LLM Provider。
 - 面试难度与题量配置、重复答题保护、即时评分、追问、进度和综合报告。
 - MySQL 持久化、Alembic 自动迁移、pytest 接口测试和 Docker Compose 一键启动。
@@ -24,6 +24,8 @@ flowchart LR
     N --> A["FastAPI API"]
     A --> M[("MySQL")]
     A --> R[("Redis")]
+    A --> Q[("Qdrant")]
+    A --> E["Ollama Embedding"]
     A --> P["LLM Provider"]
     P --> K["Mock"]
     P --> D["DeepSeek"]
@@ -33,14 +35,18 @@ flowchart LR
 核心面试链路如下：
 
 ```text
-PDF 上传 → 文本提取 → 自动切片 → 关键词检索
+PDF 上传 → 文本提取 → 自动切片 → 向量化 → Qdrant 语义检索
 → Prompt 拼接 → 生成问题 → 提交回答
 → 评分与追问 → 数据库存档 → 综合报告
 ```
 
 ## Docker 一键启动
 
-需要提前安装 Docker Desktop 或 Docker Engine + Compose。
+需要提前安装 Docker Desktop 或 Docker Engine + Compose，并在宿主机安装 Ollama。先下载 embedding 模型：
+
+```bash
+ollama pull nomic-embed-text
+```
 
 ```bash
 git clone https://github.com/ztandcos/ai-interview.git
@@ -54,16 +60,18 @@ docker compose up -d --build
 - 用户端：[http://localhost:8080](http://localhost:8080)
 - 后端接口文档：[http://localhost:8006/docs](http://localhost:8006/docs)
 - 后端健康检查：[http://localhost:8006/api/v1/health](http://localhost:8006/api/v1/health)
+- Qdrant 控制台：[http://localhost:6333/dashboard](http://localhost:6333/dashboard)
 
-默认端口为前端 `8080`、后端 `8006`、MySQL `3307`、Redis `6380`。如果端口被占用，可以在 `.env` 中修改对应的 `*_EXPOSE_PORT`。
+默认端口为前端 `8080`、后端 `8006`、MySQL `3307`、Redis `6380`、Qdrant `6333`。如果端口被占用，可以在 `.env` 中修改对应的 `*_EXPOSE_PORT`。
 
-第一次启动会自动完成数据库迁移。默认 `LLM_PROVIDER=mock`，注册后在登录页点击“获取验证码”，开发验证码会自动填入。
+第一次启动会自动完成数据库迁移。默认 `LLM_PROVIDER=mock`，注册后在登录页点击“获取验证码”，开发验证码会自动填入。上传简历前必须保证宿主机 Ollama 正在运行并已下载 `nomic-embed-text`；严格向量模式下 embedding 或 Qdrant 不可用会拒绝上传并返回 `503`，避免保存未建立索引的简历。
 
 常用命令：
 
 ```bash
 make up       # 构建并启动
 make status   # 查看容器状态
+make rag-reindex # 为已有简历重建 Qdrant 向量索引
 make logs     # 跟踪日志
 make down     # 停止服务，保留数据
 make reset    # 停止服务并删除本项目 Docker 数据卷
@@ -97,6 +105,7 @@ docker compose up -d --build backend
 DOCKER_LLM_PROVIDER=ollama
 DOCKER_OLLAMA_BASE_URL=http://host.docker.internal:11434
 DOCKER_OLLAMA_MODEL_NAME=qwen2.5:3b
+EMBEDDING_MODEL_NAME=nomic-embed-text
 DOCKER_LLM_FALLBACK_TO_MOCK=true
 ```
 
@@ -106,7 +115,7 @@ DOCKER_LLM_FALLBACK_TO_MOCK=true
 
 ### 后端
 
-本地开发需要可访问的 MySQL 和 Redis。先复制配置并按本机环境修改：
+本地开发需要可访问的 MySQL、Redis、Qdrant 和宿主机 Ollama。先复制配置并按本机环境修改：
 
 ```bash
 cp .env.example .env
@@ -135,11 +144,12 @@ make test
 make frontend-build
 ```
 
-后端测试使用临时 SQLite 数据库、Fake Redis 和 Mock LLM，不依赖正在运行的 MySQL、Redis 或外部模型，因此适合本地开发和 CI。当前接口测试覆盖：
+后端测试使用临时 SQLite 数据库、Fake Redis、Fake Vector Store 和 Mock LLM，不依赖正在运行的 MySQL、Redis、Qdrant 或 Ollama，因此适合本地开发和 CI。当前接口测试覆盖：
 
 - 注册、验证码、登录、刷新令牌、退出和密码修改。
 - JWT 保护接口与个人资料更新。
-- PDF 上传、自动切片、检索和用户数据隔离。
+- PDF 上传、自动切片、向量检索、索引删除和用户数据隔离。
+- embedding 服务不可用时的上传拒绝与数据清理。
 - 生成问题、回答评分、追问、重复答题保护和完成条件。
 - 面试记录、报告、简历与面试删除。
 
@@ -171,11 +181,11 @@ make frontend-build
 ├── migrations/           # Alembic 迁移
 ├── tests/                # 自动化测试
 ├── Dockerfile            # 后端镜像
-└── docker-compose.yml    # MySQL、Redis、后端和前端
+└── docker-compose.yml    # MySQL、Redis、Qdrant、后端和前端
 ```
 
 ## 当前边界与下一步
 
-这是“先跑通完整用户闭环”的版本。为了让代码仍然适合学习，当前 RAG 使用固定长度切片和关键词召回，还没有加入 embedding 与向量数据库；验证码默认是开发模式，没有接真实邮件；也暂未加入管理后台、SSE、Celery 和云存储。
+这是“先跑通完整用户闭环”的版本。当前 RAG 已使用固定长度切片、Ollama embedding 与 Qdrant 纯向量召回；验证码默认是开发模式，没有接真实邮件；也暂未加入管理后台、SSE、Celery 和云存储。
 
-推荐下一阶段按效果优先级迭代：先升级混合/向量检索并建立召回评估，再接真实邮件和生产安全配置，最后根据展示需求增加 SSE 或管理后台。
+推荐下一阶段按效果优先级迭代：先建立召回评估并升级为混合检索/重排序，再接真实邮件和生产安全配置，最后根据展示需求增加 SSE 或管理后台。

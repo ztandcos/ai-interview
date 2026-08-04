@@ -137,9 +137,9 @@ async def get_resume_context_chunks(
     query: str,
     top_k: int,
 ) -> list[InterviewSourceChunk]:
-    all_chunks = await list_resume_chunks(db, current_user, resume_id)
-    if not all_chunks:
-        all_chunks = await build_resume_chunks(db, current_user, resume_id)
+    chunks = await list_resume_chunks(db, current_user, resume_id)
+    if not chunks:
+        await build_resume_chunks(db, current_user, resume_id)
 
     scored_chunks = await search_resume_chunks(
         db,
@@ -148,9 +148,6 @@ async def get_resume_context_chunks(
         query,
         top_k,
     )
-    if not scored_chunks:
-        scored_chunks = [(chunk, 0) for chunk in all_chunks[:top_k]]
-
     return [
         InterviewSourceChunk(
             id=chunk.id,

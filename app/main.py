@@ -9,6 +9,7 @@ from sqlalchemy.exc import OperationalError
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.redis import close_redis
+from app.services.embedding_provider import RAGUnavailableError
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,16 @@ async def database_operational_error_handler(
     )
 
 
+async def rag_unavailable_error_handler(
+    _: Request,
+    exc: RAGUnavailableError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": str(exc)},
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.PROJECT_NAME,
@@ -40,6 +51,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.add_exception_handler(OperationalError, database_operational_error_handler)
+    app.add_exception_handler(RAGUnavailableError, rag_unavailable_error_handler)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,

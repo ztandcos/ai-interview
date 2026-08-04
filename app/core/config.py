@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     RESUME_CHUNK_SIZE: int = 800
     RESUME_CHUNK_OVERLAP: int = 120
     RESUME_SEARCH_DEFAULT_TOP_K: int = 5
+    QDRANT_URL: str = "http://127.0.0.1:6333"
+    QDRANT_COLLECTION_NAME: str = "resume_chunks"
+    EMBEDDING_MODEL_NAME: str = "nomic-embed-text"
+    EMBEDDING_VECTOR_SIZE: int = 768
+    EMBEDDING_TIMEOUT_SECONDS: float = 30.0
 
     LLM_PROVIDER: str = "mock"
     LLM_MODEL_NAME: str = "deepseek-chat"
@@ -49,7 +54,11 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_MODEL_NAME: str = "llama3.1"
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:

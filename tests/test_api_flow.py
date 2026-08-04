@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -230,6 +231,7 @@ async def test_resume_rag_and_interview_session_flow(
     search_results = search_response.json()
     assert search_results
     assert search_results[0]["score"] > 0
+    assert isinstance(search_results[0]["score"], float)
 
     question_response = await client.post(
         f"/api/v1/resumes/{resume_id}/interview/questions",
@@ -396,3 +398,86 @@ async def test_resume_rag_and_interview_session_flow(
         headers=headers,
     )
     assert delete_resume_response.status_code == 200
+    assert client._fake_vector_store._vectors == {}  # type: ignore[attr-defined]
+
+
+async def test_upload_rejects_and_cleans_up_when_embedding_is_unavailable(
+    client: AsyncClient,
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from app.services import resume_chunk_service, resume_service
+    from app.services.embedding_provider import RAGUnavailableError
+
+    class UnavailableProvider:
+        async def embed(self, _: list[str]) -> list[list[float]]:
+            raise RAGUnavailableError("Embedding service is unavailable")
+
+    monkeypatch.setattr(resume_service, "extract_text_from_pdf", lambda _: SAMPLE_RESUME_TEXT)
+    monkeypatch.setattr(
+        resume_chunk_service,
+        "get_embedding_provider",
+        lambda: UnavailableProvider(),
+    )
+    tokens = await register_and_login(client)
+    headers = auth_headers(tokens)
+
+    response = await client.post(
+        "/api/v1/resumes",
+        headers=headers,
+        files={
+            "file": (
+                "unavailable.pdf",
+                b"%PDF-1.4\n% test pdf bytes\n",
+                "application/pdf",
+            )
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Embedding service is unavailable" in response.json()["detail"]
+    assert (await client.get("/api/v1/resumes", headers=headers)).json() == []
+    assert not list((tmp_path / "uploads").rglob("*.pdf"))
+    assert client._fake_vector_store._vectors == {}  # type: ignore[attr-defined]
+
+
+async def test_upload_rejects_and_cleans_up_when_vector_store_is_unavailable(
+    client: AsyncClient,
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from app.services import resume_chunk_service, resume_service
+    from app.services.embedding_provider import RAGUnavailableError
+
+    class UnavailableVectorStore:
+        async def replace_resume_vectors(self, _: list[Any], __: list[list[float]]) -> None:
+            raise RAGUnavailableError("Qdrant is unavailable")
+
+        async def delete_resume_vectors(self, _: int, __: int) -> None:
+            return None
+
+    monkeypatch.setattr(resume_service, "extract_text_from_pdf", lambda _: SAMPLE_RESUME_TEXT)
+    monkeypatch.setattr(
+        resume_chunk_service,
+        "get_vector_store",
+        lambda: UnavailableVectorStore(),
+    )
+    tokens = await register_and_login(client)
+    headers = auth_headers(tokens)
+
+    response = await client.post(
+        "/api/v1/resumes",
+        headers=headers,
+        files={
+            "file": (
+                "qdrant-unavailable.pdf",
+                b"%PDF-1.4\n% test pdf bytes\n",
+                "application/pdf",
+            )
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Qdrant is unavailable" in response.json()["detail"]
+    assert (await client.get("/api/v1/resumes", headers=headers)).json() == []
+    assert not list((tmp_path / "uploads").rglob("*.pdf"))

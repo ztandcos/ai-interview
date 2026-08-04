@@ -15,6 +15,7 @@ from app.models.interview import Interview
 from app.models.resume import Resume
 from app.models.resume_chunk import ResumeChunk
 from app.models.user import User
+from app.services.vector_store import get_vector_store
 
 
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf", "application/x-pdf"}
@@ -174,6 +175,7 @@ async def delete_resume(
             detail="Delete related interviews before deleting this resume",
         )
 
+    await get_vector_store().delete_resume_vectors(current_user.id, resume.id)
     await db.execute(
         delete(ResumeChunk).where(
             ResumeChunk.resume_id == resume.id,
@@ -187,3 +189,20 @@ async def delete_resume(
         Path(resume.storage_path).unlink(missing_ok=True)
     except OSError:
         logger.warning("Could not delete resume file %s", resume.storage_path)
+
+
+async def cleanup_failed_resume_upload(
+    db: AsyncSession,
+    resume_id: int,
+    storage_path: str,
+) -> None:
+    """Remove persisted artifacts after strict RAG indexing rejects an upload."""
+    await db.execute(delete(ResumeChunk).where(ResumeChunk.resume_id == resume_id))
+    resume = await db.get(Resume, resume_id)
+    if resume is not None:
+        await db.delete(resume)
+    await db.commit()
+    try:
+        Path(storage_path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not delete failed resume file %s", storage_path)

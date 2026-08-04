@@ -1,10 +1,13 @@
 import json
+import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.interview import Interview, InterviewMessage, InterviewReport
 from app.models.user import User
 from app.schemas.interview import AnswerScoringRequest, InterviewQuestion
@@ -22,8 +25,10 @@ from app.schemas.interview_session import (
 from app.services.auth_service import utc_now_naive
 from app.services.interview_service import (
     generate_live_interview_turn,
+    prepare_live_interview_turn,
     score_resume_interview_answer,
 )
+from app.services.llm_provider import normalize_live_interview_turn, parse_json_object
 
 
 INTERVIEW_STATUS_ACTIVE = "active"
@@ -219,7 +224,6 @@ async def submit_interview_answer(
     await db.flush()
 
     answered_count = len(answered_question_ids) + 1
-    ask_next_question = answered_count < interview.question_count
     history = await build_live_history(db, current_user, interview.id)
     turn, source_chunks, provider_name = await generate_live_interview_turn(
         db,
@@ -231,7 +235,11 @@ async def submit_interview_answer(
         history=history,
         top_k=request.top_k,
         opening=False,
-        ask_next_question=ask_next_question,
+        ask_next_question=True,
+    )
+    should_end = turn.should_end or (
+        settings.LIVE_INTERVIEW_MAX_TURNS > 0
+        and answered_count >= settings.LIVE_INTERVIEW_MAX_TURNS
     )
     coach_message = InterviewMessage(
         interview_id=interview.id,
@@ -251,7 +259,7 @@ async def submit_interview_answer(
     )
     db.add(coach_message)
     next_question_message: InterviewMessage | None = None
-    if ask_next_question:
+    if not should_end:
         next_question_message = InterviewMessage(
             interview_id=interview.id,
             user_id=current_user.id,
@@ -276,6 +284,8 @@ async def submit_interview_answer(
     await db.refresh(coach_message)
     if next_question_message is not None:
         await db.refresh(next_question_message)
+    if should_end:
+        await complete_interview(db, current_user, interview.id, force=True)
 
     return InterviewAnswerResponse(
         answer_message=to_message_response(answer_message),
@@ -288,8 +298,160 @@ async def submit_interview_answer(
         ),
         answered_count=answered_count,
         total_questions=interview.question_count,
-        is_finished=not ask_next_question,
+        is_finished=should_end,
     )
+
+
+async def stream_interview_answer(
+    db: AsyncSession,
+    current_user: User,
+    interview_id: int,
+    request: InterviewAnswerRequest,
+) -> AsyncIterator[dict[str, Any]]:
+    interview = await get_owned_interview(db, current_user, interview_id)
+    ensure_interview_active(interview)
+    question_message = await db.scalar(
+        select(InterviewMessage).where(
+            InterviewMessage.id == request.question_message_id,
+            InterviewMessage.interview_id == interview.id,
+            InterviewMessage.user_id == current_user.id,
+            InterviewMessage.message_type == "question",
+        )
+    )
+    if question_message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question message not found")
+    answered_question_ids = await get_answered_question_ids(db, current_user, interview.id)
+    if question_message.id in answered_question_ids:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Question has already been answered")
+
+    answer_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="user",
+        message_type="answer",
+        content=request.answer,
+        metadata_json=json_dumps({"question_message_id": question_message.id}),
+    )
+    db.add(answer_message)
+    await db.commit()
+    await db.refresh(answer_message)
+    yield {"event": "answer", "data": {"message": to_message_response(answer_message).model_dump(mode="json")}}
+
+    answered_count = len(answered_question_ids) + 1
+    history = await build_live_history(db, current_user, interview.id)
+    provider, system_prompt, turn_prompt, source_chunks = await prepare_live_interview_turn(
+        db,
+        current_user,
+        interview.resume_id,
+        focus=interview.focus,
+        difficulty=interview.difficulty,
+        turn_number=answered_count + 1,
+        history=history,
+        top_k=request.top_k,
+        opening=False,
+        ask_next_question=True,
+    )
+    raw_content = ""
+    emitted = {"feedback": "", "question": ""}
+    async for token in provider.stream_live_interview_turn(
+        system_prompt,
+        turn_prompt,
+        source_chunks,
+        opening=False,
+        ask_next_question=True,
+    ):
+        raw_content += token
+        for field in emitted:
+            value = extract_stream_string(raw_content, field)
+            if value is not None and value.startswith(emitted[field]):
+                delta = value[len(emitted[field]) :]
+                if delta:
+                    emitted[field] = value
+                    yield {"event": "delta", "data": {"field": field, "content": delta}}
+
+    turn = normalize_live_interview_turn(parse_json_object(raw_content), source_chunks)
+    should_end = turn.should_end or (
+        settings.LIVE_INTERVIEW_MAX_TURNS > 0
+        and answered_count >= settings.LIVE_INTERVIEW_MAX_TURNS
+    )
+    if not should_end and not turn.question:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM live interview response did not contain a question",
+        )
+
+    score_result = await score_resume_interview_answer(
+        db,
+        current_user,
+        interview.resume_id,
+        AnswerScoringRequest(question=question_message.content, answer=request.answer, top_k=request.top_k),
+    )
+    score_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="assistant",
+        message_type="score",
+        content=build_score_message_content(score_result),
+        score=score_result.score,
+        metadata_json=json_dumps(
+            {
+                "provider": score_result.provider,
+                "question_message_id": question_message.id,
+                "answer_message_id": answer_message.id,
+                "level": score_result.level,
+                "strengths": score_result.strengths,
+                "improvements": score_result.improvements,
+                "reference_points": score_result.reference_points,
+                "source_chunk_ids": [chunk.id for chunk in score_result.source_chunks],
+                "source_chunk_indexes": [chunk.chunk_index for chunk in score_result.source_chunks],
+            }
+        ),
+    )
+    coach_message = InterviewMessage(
+        interview_id=interview.id,
+        user_id=current_user.id,
+        role="assistant",
+        message_type="feedback",
+        content=turn.feedback or "谢谢你的回答，我已经记录了这部分表现。",
+        metadata_json=json_dumps(
+            {
+                "provider": provider.name,
+                "question_message_id": question_message.id,
+                "answer_message_id": answer_message.id,
+                "source_chunk_ids": [chunk.id for chunk in source_chunks],
+                "source_chunk_indexes": [chunk.chunk_index for chunk in source_chunks],
+            }
+        ),
+    )
+    db.add_all([score_message, coach_message])
+    next_question_message: InterviewMessage | None = None
+    if not should_end:
+        next_question_message = InterviewMessage(
+            interview_id=interview.id,
+            user_id=current_user.id,
+            role="assistant",
+            message_type="question",
+            content=turn.question or "请继续结合一个具体例子展开说明。",
+            metadata_json=json_dumps(
+                question_metadata(provider.name, interview.difficulty, turn.expected_points, turn.source_chunk_indexes, source_chunks)
+            ),
+        )
+        db.add(next_question_message)
+    await db.commit()
+    await db.refresh(score_message)
+    await db.refresh(coach_message)
+    if next_question_message is not None:
+        await db.refresh(next_question_message)
+    if should_end:
+        await complete_interview(db, current_user, interview.id, force=True)
+    yield {
+        "event": "complete",
+        "data": {
+            "coach_message": to_message_response(coach_message).model_dump(mode="json"),
+            "next_question": to_message_response(next_question_message).model_dump(mode="json") if next_question_message else None,
+            "is_finished": should_end,
+        },
+    }
 
 
 async def complete_interview(
@@ -316,6 +478,11 @@ async def complete_interview(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Interview has no answered question",
+        )
+    if not force and interview.question_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Let the AI finish the interview or confirm an early finish",
         )
     if not force and len(answered_question_ids) < interview.question_count:
         remaining = interview.question_count - len(answered_question_ids)
@@ -617,3 +784,28 @@ def json_loads(value: str, default: Any | None = None) -> Any:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def extract_stream_string(content: str, field: str) -> str | None:
+    match = re.search(rf'"{re.escape(field)}"\s*:\s*"', content)
+    if match is None:
+        return None
+    chars: list[str] = []
+    escaped = False
+    for character in content[match.end() :]:
+        if escaped:
+            chars.append(character)
+            escaped = False
+            continue
+        if character == "\\":
+            chars.append(character)
+            escaped = True
+            continue
+        if character == '"':
+            break
+        chars.append(character)
+    value = "".join(chars)
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace("\\n", "\n")

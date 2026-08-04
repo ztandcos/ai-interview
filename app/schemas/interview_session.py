@@ -24,7 +24,7 @@ class InterviewStartRequest(BaseModel):
     resume_id: int = Field(ge=1)
     focus: str = Field(default="backend engineering", min_length=1, max_length=100)
     difficulty: InterviewDifficulty = "medium"
-    question_count: int = Field(default=5, ge=3, le=10)
+    question_count: int = Field(default=0, ge=0, le=10)
     top_k: int = Field(
         default=settings.RESUME_SEARCH_DEFAULT_TOP_K,
         ge=1,

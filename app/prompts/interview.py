@@ -95,6 +95,8 @@ def build_live_interview_system_prompt(difficulty: str) -> str:
             "Ask exactly one focused question at a time. Adapt the next question to the "
             "candidate's answer instead of following a fixed question list.",
             "Ground questions in the retrieved resume evidence; do not invent experience.",
+            "Decide for yourself when the interview has enough evidence across the candidate's "
+            "experience and required depth, then close naturally instead of asking another question.",
             difficulty_instructions.get(difficulty, difficulty_instructions["medium"]),
         ]
     )
@@ -115,7 +117,7 @@ def build_live_interview_turn_prompt(
         "the first resume-grounded question."
         if opening
         else (
-            "Briefly acknowledge the last answer and ask the next best question."
+            "feedback MUST be a non-empty, brief acknowledgement of the last answer. Then ask the next best question."
             if ask_next_question
             else "Briefly close the conversation after the last answer; do not ask another question."
         )
@@ -123,12 +125,14 @@ def build_live_interview_turn_prompt(
     return "\n\n".join(
         [
             "Return only valid JSON. Do not use markdown.",
-            "JSON keys: greeting (string or null), feedback (string or null), question "
-            "(string or null), expected_points (string array), source_chunk_indexes (integer array).",
+            "JSON keys in this exact order: greeting (string or null), feedback (string or null), "
+            "question (string or null), expected_points (string array), source_chunk_indexes "
+            "(integer array), should_end (boolean).",
             f"Target role: {focus}",
             f"Difficulty: {difficulty}",
             f"Question number: {turn_number}",
-            f"Instruction: {stage}",
+            f"Instruction: {stage} When you decide the interview is complete, set should_end to "
+            "true and question to null. Otherwise set should_end to false and ask one next question."
             "Conversation so far:",
             history or "No prior messages.",
             "Retrieved resume chunks:",

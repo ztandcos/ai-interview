@@ -282,7 +282,6 @@ async def test_resume_rag_and_interview_session_flow(
         json={
             "resume_id": resume_id,
             "focus": "AI application backend intern",
-            "question_count": 3,
             "top_k": 5,
         },
     )
@@ -296,6 +295,7 @@ async def test_resume_rag_and_interview_session_flow(
     ]
     assert started["interview"]["status"] == "active"
     assert started["interview"]["difficulty"] == "medium"
+    assert started["interview"]["question_count"] == 0
     assert len(question_message_ids) == 1
     assert started["messages"][0]["message_type"] == "greeting"
 
@@ -319,7 +319,7 @@ async def test_resume_rag_and_interview_session_flow(
     assert answer_body["coach_message"]["message_type"] == "feedback"
     assert answer_body["score_message"]["score"] is not None
     assert answer_body["answered_count"] == 1
-    assert answer_body["total_questions"] == 3
+    assert answer_body["total_questions"] == 0
     assert answer_body["is_finished"] is False
     assert answer_body["next_question"]["message_type"] == "question"
     next_question_id = answer_body["next_question"]["id"]
@@ -370,12 +370,13 @@ async def test_resume_rag_and_interview_session_flow(
             assert remaining_body["next_question"] is not None
             next_question_id = remaining_body["next_question"]["id"]
 
-    assert remaining_body["is_finished"] is True
-    assert remaining_body["next_question"] is None
+    assert remaining_body["is_finished"] is False
+    assert remaining_body["next_question"] is not None
 
     complete_response = await client.post(
         f"/api/v1/interviews/{interview_id}/complete",
         headers=headers,
+        json={"force": True},
     )
     assert complete_response.status_code == 200
     completed = complete_response.json()
@@ -389,7 +390,6 @@ async def test_resume_rag_and_interview_session_flow(
         json={
             "resume_id": resume_id,
             "focus": "AI application backend intern",
-            "question_count": 3,
             "top_k": 5,
         },
     )
@@ -399,8 +399,8 @@ async def test_resume_rag_and_interview_session_flow(
         for message in early_start_response.json()["messages"]
         if message["message_type"] == "question"
     )
-    await client.post(
-        f"/api/v1/interviews/{early_interview['id']}/answers",
+    stream_response = await client.post(
+        f"/api/v1/interviews/{early_interview['id']}/answers/stream",
         headers=headers,
         json={
             "question_message_id": early_question["id"],
@@ -408,6 +408,9 @@ async def test_resume_rag_and_interview_session_flow(
             "top_k": 5,
         },
     )
+    assert stream_response.status_code == 200
+    assert "event: delta" in stream_response.text
+    assert "event: complete" in stream_response.text
     forced_complete_response = await client.post(
         f"/api/v1/interviews/{early_interview['id']}/complete",
         headers=headers,

@@ -14,22 +14,19 @@
         <router-link to="/dashboard">← 返回控制台</router-link>
         <p class="eyebrow">Live AI interview</p>
         <h1>{{ detail.interview.focus }}</h1>
-        <p>{{ difficultyLabel[detail.interview.difficulty] }}难度 · AI 会根据你的每次回答实时调整下一题</p>
+        <p>{{ difficultyLabel[detail.interview.difficulty] }}难度 · AI 会根据你的每次回答实时调整并自行决定何时结束</p>
       </div>
       <div class="progress-box">
         <strong>{{ answeredCount }}</strong>
-        <span>/ {{ detail.interview.question_count }}</span>
-        <small>已完成轮次</small>
+        <small>次已交流</small>
       </div>
     </header>
-
-    <div class="progress-track"><i :style="{ width: `${progress}%` }"></i></div>
 
     <div class="interview-layout">
       <main class="card chat-panel">
         <div ref="chatWindow" class="chat-window" aria-live="polite">
           <article
-            v-for="message in visibleMessages"
+          v-for="message in displayMessages"
             :key="message.id"
             :class="['chat-message', message.role === 'user' ? 'candidate' : 'interviewer']"
           >
@@ -65,10 +62,11 @@
             maxlength="5000"
             placeholder="直接像真实面试一样回答。可以讲背景、你的角色、做法、取舍与验证。"
             :disabled="submitting"
+            @keydown.enter.exact="handleEnter"
             required
           ></textarea>
           <div class="composer-footer">
-            <small>{{ answer.length }} / 5000 · 提交后 AI 将基于你的回答继续追问</small>
+            <small>Enter 发送 · Shift + Enter 换行 · {{ answer.length }} / 5000</small>
             <button class="button button-primary" :disabled="submitting || !answer">
               <span v-if="submitting" class="spinner"></span>
               {{ submitting ? 'AI 正在生成下一步' : '发送回答 →' }}
@@ -108,7 +106,7 @@
           <h3>实时面试中</h3>
           <div class="status-row"><span>目标岗位</span><strong>{{ detail.interview.focus }}</strong></div>
           <div class="status-row"><span>面试难度</span><strong>{{ difficultyLabel[detail.interview.difficulty] }}</strong></div>
-          <div class="status-row"><span>下一步</span><strong>{{ currentQuestion ? '回答当前问题' : '生成报告' }}</strong></div>
+          <div class="status-row"><span>结束方式</span><strong>由 AI 判断，也可随时结束</strong></div>
           <button
             v-if="detail.interview.status === 'active' && answeredCount"
             class="end-button"
@@ -139,7 +137,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { getErrorMessage } from '../api/client'
-import { completeInterview, getInterview, submitAnswer } from '../api/interview'
+import { completeInterview, getInterview, streamAnswer } from '../api/interview'
 
 const route = useRoute()
 const router = useRouter()
@@ -150,11 +148,13 @@ const submitting = ref(false)
 const completing = ref(false)
 const error = ref('')
 const answer = ref('')
+const streamingMessages = ref([])
 const difficultyLabel = { easy: '基础', medium: '进阶', hard: '挑战' }
 
 const visibleMessages = computed(() =>
   detail.value?.messages.filter((message) => message.message_type !== 'score') || [],
 )
+const displayMessages = computed(() => [...visibleMessages.value, ...streamingMessages.value])
 const questionMessages = computed(() =>
   detail.value?.messages.filter((message) => message.message_type === 'question') || [],
 )
@@ -168,11 +168,6 @@ const currentQuestion = computed(() =>
   questionMessages.value.find((message) => !answeredQuestionIds.value.has(message.id)),
 )
 const answeredCount = computed(() => answerMessages.value.length)
-const progress = computed(() =>
-  detail.value?.interview.question_count
-    ? Math.round((answeredCount.value / detail.value.interview.question_count) * 100)
-    : 0,
-)
 
 async function scrollToLatest() {
   await nextTick()
@@ -195,20 +190,56 @@ async function handleSubmit() {
   if (!currentQuestion.value || !answer.value) return
   error.value = ''
   submitting.value = true
+  const submittedAnswer = answer.value
+  streamingMessages.value = [
+    {
+      id: 'pending-answer',
+      role: 'user',
+      message_type: 'answer',
+      content: submittedAnswer,
+      metadata: { question_message_id: currentQuestion.value.id },
+    },
+  ]
+  answer.value = ''
   try {
-    await submitAnswer(route.params.id, {
+    await streamAnswer(route.params.id, {
       question_message_id: currentQuestion.value.id,
-      answer: answer.value,
+      answer: submittedAnswer,
       top_k: 5,
+    }, (eventName, data) => {
+      if (eventName === 'delta') {
+        let message = streamingMessages.value.find((item) => item.message_type === data.field)
+        if (!message) {
+          message = {
+            id: `stream-${data.field}`,
+            role: 'assistant',
+            message_type: data.field,
+            content: '',
+            metadata: {},
+          }
+          streamingMessages.value.push(message)
+        }
+        message.content += data.content
+        scrollToLatest()
+      }
+      if (eventName === 'error') throw new Error(data.detail)
     })
-    answer.value = ''
+    streamingMessages.value = []
     await loadInterview()
   } catch (requestError) {
     error.value = getErrorMessage(requestError, '回答提交失败')
+    answer.value = submittedAnswer
+    streamingMessages.value = []
   } finally {
     submitting.value = false
     await scrollToLatest()
   }
+}
+
+function handleEnter(event) {
+  if (event.isComposing) return
+  event.preventDefault()
+  handleSubmit()
 }
 
 async function handleComplete(force = false) {
@@ -247,8 +278,6 @@ onMounted(loadInterview)
 .progress-box strong { font-size: 36px; line-height: 1; }
 .progress-box span { color: var(--muted); }
 .progress-box small { grid-column: 1 / -1; margin-top: 5px; color: var(--muted); font-size: 10px; }
-.progress-track { height: 5px; margin: 24px 0 30px; overflow: hidden; border-radius: 10px; background: #dfe5dd; }
-.progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--green), #79a94e); transition: width 300ms ease; }
 .interview-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 22px; align-items: start; }
 .chat-panel { min-height: 650px; padding: 0; overflow: hidden; box-shadow: none; }
 .chat-window { display: grid; max-height: 620px; gap: 18px; padding: clamp(22px, 4vw, 42px); overflow-y: auto; background: linear-gradient(180deg, #fbfcfa, #fff); }

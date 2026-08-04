@@ -25,7 +25,7 @@
         <p>
           {{ formatDate(detail.interview.completed_at) }} ·
           {{ difficultyLabel[detail.interview.difficulty] }}难度 ·
-          {{ detail.interview.question_count }} 道题
+          {{ detail.interview.question_count ? `${detail.interview.question_count} 道题` : 'AI 自主结束' }}
         </p>
       </div>
       <div class="score-ring" :style="{ '--score': report.overall_score }">

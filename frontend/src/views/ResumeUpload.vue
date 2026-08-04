@@ -89,7 +89,7 @@
           <div class="section-index">03</div>
           <div class="section-content">
             <h2>设置强度</h2>
-            <p>第一次练习建议使用进阶难度和 5 道题。</p>
+            <p>第一次练习建议使用进阶难度。AI 会依据你的回答自行决定何时结束。</p>
             <div class="difficulty-grid">
               <label
                 v-for="option in difficultyOptions"
@@ -100,26 +100,6 @@
                 <strong>{{ option.label }}</strong>
                 <small>{{ option.description }}</small>
               </label>
-            </div>
-            <div class="question-count">
-              <span>问题数量</span>
-              <div>
-                <button
-                  type="button"
-                  :disabled="form.question_count <= 3"
-                  @click="form.question_count--"
-                >
-                  −
-                </button>
-                <strong>{{ form.question_count }}</strong>
-                <button
-                  type="button"
-                  :disabled="form.question_count >= 10"
-                  @click="form.question_count++"
-                >
-                  ＋
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -138,9 +118,7 @@
           <div class="preview-row">
             <span>难度</span><strong>{{ currentDifficulty.label }}</strong>
           </div>
-          <div class="preview-row">
-            <span>问题</span><strong>{{ form.question_count }} 道</strong>
-          </div>
+          <div class="preview-row"><span>结束方式</span><strong>AI 自主判断</strong></div>
           <div class="preview-row">
             <span>上下文</span><strong>{{ selectedFile ? '新简历' : selectedResumeName }}</strong>
           </div>
@@ -176,7 +154,6 @@ const progressText = ref('正在准备')
 const form = reactive({
   focus: 'AI 应用开发实习生',
   difficulty: 'medium',
-  question_count: 5,
 })
 const difficultyOptions = [
   { value: 'easy', label: '基础', description: '概念与项目概览' },
@@ -261,7 +238,6 @@ async function handleStart() {
       resume_id: resumeId,
       focus: form.focus,
       difficulty: form.difficulty,
-      question_count: form.question_count,
       top_k: 5,
     })
     router.push(`/interviews/${result.interview.id}`)

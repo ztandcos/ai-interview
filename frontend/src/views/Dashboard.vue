@@ -88,7 +88,7 @@
         </div>
 
         <div class="interview-meta">
-          <span><b>{{ item.question_count }}</b> 道问题</span>
+          <span><b>{{ item.question_count || 'AI' }}</b> {{ item.question_count ? '道问题' : '自主结束' }}</span>
           <span>{{ formatDate(item.created_at) }}</span>
         </div>
 

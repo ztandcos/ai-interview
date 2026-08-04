@@ -38,6 +38,7 @@ class LiveInterviewTurn(BaseModel):
     question: str | None = None
     expected_points: list[str] = Field(default_factory=list)
     source_chunk_indexes: list[int] = Field(default_factory=list)
+    should_end: bool = False
 
 
 class QuestionGenerationResponse(BaseModel):

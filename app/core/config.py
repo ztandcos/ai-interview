@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 2
     LLM_TEMPERATURE: float = 0.2
     LLM_FALLBACK_TO_MOCK: bool = False
+    LIVE_INTERVIEW_MAX_TURNS: int = 12
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_MODEL_NAME: str = "qwen2.5:3b"
 

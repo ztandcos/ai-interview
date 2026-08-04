@@ -19,7 +19,7 @@ from app.schemas.interview import (
     QuestionGenerationRequest,
     QuestionGenerationResponse,
 )
-from app.services.llm_provider import get_llm_provider
+from app.services.llm_provider import LLMProvider, get_llm_provider
 from app.services.resume_chunk_service import (
     build_resume_chunks,
     list_resume_chunks,
@@ -147,6 +147,46 @@ async def generate_live_interview_turn(
     opening: bool,
     ask_next_question: bool,
 ) -> tuple[LiveInterviewTurn, list[InterviewSourceChunk], str]:
+    provider, system_prompt, turn_prompt, source_chunks = await prepare_live_interview_turn(
+        db,
+        current_user,
+        resume_id,
+        focus=focus,
+        difficulty=difficulty,
+        turn_number=turn_number,
+        history=history,
+        top_k=top_k,
+        opening=opening,
+        ask_next_question=ask_next_question,
+    )
+    turn = await provider.generate_live_interview_turn(
+        system_prompt,
+        turn_prompt,
+        source_chunks,
+        opening=opening,
+        ask_next_question=ask_next_question,
+    )
+    if ask_next_question and not turn.should_end and not turn.question:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM live interview response did not contain a question",
+        )
+    return turn, source_chunks, provider.name
+
+
+async def prepare_live_interview_turn(
+    db: AsyncSession,
+    current_user: User,
+    resume_id: int,
+    *,
+    focus: str,
+    difficulty: str,
+    turn_number: int,
+    history: str,
+    top_k: int,
+    opening: bool,
+    ask_next_question: bool,
+) -> tuple[LLMProvider, str, str, list[InterviewSourceChunk]]:
     query = focus if opening else history
     source_chunks = await get_resume_context_chunks(
         db,
@@ -156,27 +196,17 @@ async def generate_live_interview_turn(
         top_k,
     )
     provider = get_llm_provider()
-    turn = await provider.generate_live_interview_turn(
-        build_live_interview_system_prompt(difficulty),
-        build_live_interview_turn_prompt(
-            focus=focus,
-            difficulty=difficulty,
-            turn_number=turn_number,
-            history=history,
-            chunks=source_chunks,
-            opening=opening,
-            ask_next_question=ask_next_question,
-        ),
-        source_chunks,
+    system_prompt = build_live_interview_system_prompt(difficulty)
+    turn_prompt = build_live_interview_turn_prompt(
+        focus=focus,
+        difficulty=difficulty,
+        turn_number=turn_number,
+        history=history,
+        chunks=source_chunks,
         opening=opening,
         ask_next_question=ask_next_question,
     )
-    if ask_next_question and not turn.question:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="LLM live interview response did not contain a question",
-        )
-    return turn, source_chunks, provider.name
+    return provider, system_prompt, turn_prompt, source_chunks
 
 
 async def get_resume_context_chunks(
